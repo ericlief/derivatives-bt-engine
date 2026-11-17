@@ -391,8 +391,14 @@ def test_forecast_activity_hard_min_excludes_immediately():
 
 def test_selection_rebalance_cadence_is_explicit():
     """Book review cadence is distinct from contract-roll rebalancing."""
-    monthly = parse_args(["--selection-rebalance", "monthly"])
-    yearly = parse_args(["--selection-rebalance", "yearly"])
+    monthly = parse_args([
+        "--signal-model", "multi_ewmac",
+        "--selection-rebalance", "monthly",
+    ])
+    yearly = parse_args([
+        "--signal-model", "multi_ewmac",
+        "--selection-rebalance", "yearly",
+    ])
 
     assert monthly.selection_rebalance == "monthly"
     assert yearly.selection_rebalance == "yearly"
@@ -419,7 +425,10 @@ def test_return_tsmom_signal_model_exposes_parameterized_horizons():
 
 def test_selection_compact_report_mode_is_explicit():
     """Large robustness grids can omit duplicated exhaustive audit panels."""
-    args = parse_args(["--selection-report-mode", "compact"])
+    args = parse_args([
+        "--signal-model", "multi_ewmac",
+        "--selection-report-mode", "compact",
+    ])
 
     assert args.selection_report_mode == "compact"
 
@@ -427,6 +436,8 @@ def test_selection_compact_report_mode_is_explicit():
 def test_backtest_period_is_typed_and_inclusive():
     """A bounded cash replay keeps typed endpoints and resets outside rows."""
     args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
         "--backtest-start-date",
         "2024-01-01",
         "--backtest-end-date",
@@ -810,9 +821,12 @@ def test_review_instruments_omit_never_selected_forecast_rejections():
 
 def test_build_selection_entrypoint_defaults_to_complete_pipeline():
     """The new command emits candidates and a book unless asked to stop."""
-    args = parse_args([], complete_default=True)
+    args = parse_args(
+        ["--signal-model", "multi_ewmac"], complete_default=True
+    )
     candidates_only = parse_args(
-        ["--candidates-only"], complete_default=True
+        ["--signal-model", "multi_ewmac", "--candidates-only"],
+        complete_default=True,
     )
 
     assert args.complete is True
@@ -821,16 +835,21 @@ def test_build_selection_entrypoint_defaults_to_complete_pipeline():
 
 def test_complete_selection_requires_explicit_cache_root():
     """Complete runs cannot silently write to the project cache directory."""
-    assert parse_args(["--cache", "/tmp/selection-cache"]).cache.as_posix() == (
+    assert parse_args([
+        "--signal-model", "multi_ewmac",
+        "--cache", "/tmp/selection-cache",
+    ]).cache.as_posix() == (
         "/tmp/selection-cache"
     )
     with pytest.raises(ValueError, match="--cache is required"):
-        run(["--complete"])
+        run(["--signal-model", "multi_ewmac", "--complete"])
 
 
 def test_selection_exposes_executable_buffer_sensitivities():
     """Cash execution can disable the band or trade directly to optimum."""
     args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
         "--buffer-size",
         "0",
         "--no-buffer-trade-to-edge",
@@ -844,28 +863,36 @@ def test_selection_exposes_executable_buffer_sensitivities():
 
 def test_selection_exposes_offline_target_volatility_override():
     """A cached screen can be resized without another market-data request."""
-    args = parse_args(["--target-vol", "0.15"])
+    args = parse_args([
+        "--signal-model", "multi_ewmac", "--target-vol", "0.15"
+    ])
 
     assert args.target_vol == pytest.approx(0.15)
 
 
 def test_selection_can_include_roll_cost_in_greedy_score():
     """The roll-cost sensitivity is opt-in and explicit at the CLI."""
-    args = parse_args(["--include-roll-cost-in-score"])
+    args = parse_args([
+        "--signal-model", "multi_ewmac", "--include-roll-cost-in-score"
+    ])
 
     assert args.include_roll_cost_in_score is True
 
 
 def test_starting_weight_remains_alias_for_weight_idm_cap():
     """Existing run scripts keep working after the parameter is clarified."""
-    args = parse_args(["--starting-weight", "0.25"])
+    args = parse_args([
+        "--signal-model", "multi_ewmac", "--starting-weight", "0.25"
+    ])
 
     assert args.max_weight_idm == pytest.approx(0.25)
 
 
 def test_legacy_margin_option_is_per_instrument_cap():
     """The old option name maps to the clarified per-instrument constraint."""
-    args = parse_args(["--max-margin-pct", "20"])
+    args = parse_args([
+        "--signal-model", "multi_ewmac", "--max-margin-pct", "20"
+    ])
 
     assert args.max_instr_margin_pct == pytest.approx(20.0)
     assert args.max_book_margin_pct is None
@@ -900,6 +927,8 @@ def test_run_loads_explicit_market_parquet_and_saves_typed_rows(tmp_path):
     }).write_parquet(source)
 
     saved_path, selected = run([
+        "--signal-model",
+        "multi_ewmac",
         "--input",
         str(source),
         "--output",
@@ -934,7 +963,14 @@ def test_run_rejects_csv_output_path(tmp_path):
     }).write_parquet(source)
 
     with pytest.raises(ValueError, match=r"\.parquet extension"):
-        run(["--input", str(source), "--output", str(tmp_path / "step1.csv")])
+        run([
+            "--signal-model",
+            "multi_ewmac",
+            "--input",
+            str(source),
+            "--output",
+            str(tmp_path / "step1.csv"),
+        ])
 
 
 def test_subsystem_reference_correlation_uses_daily_date_key():
