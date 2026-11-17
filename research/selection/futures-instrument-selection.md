@@ -373,6 +373,7 @@ be reproduced directly from the reported cash costs and `ann_dvol`.
 .venv/bin/futures-cost-risk \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --spread-duration '5 D' \
   --fast-vol-span 32 \
   --slow-vol-years 10 \
@@ -1416,6 +1417,7 @@ volatility inputs once:
 futures-market-snapshot \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --ib-account-name taxable \
   --snapshot-output /home/dev/data/fin/misc/results/futures_market_snapshot.parquet
 ```
@@ -1451,6 +1453,7 @@ Build the expensive, reusable historical rule/cost cache from that snapshot:
 futures-rule-cache \
   --snapshot-input /home/dev/data/fin/misc/results \
   --max-snapshot-age-days 30 \
+  --cache /home/dev/data/fin/misc/cache/futures \
   --cost-ewmac-fast-spans 4,8,16,32,64 \
   --rule-cost-limit-sr 0.15 \
   --history-db /home/dev/fin/db/pysystemtrade_reference.duckdb \

@@ -26,19 +26,22 @@ null.
 
 Run with TWS/IB Gateway available::
 
-    futures-market-snapshot --instruments all-pysystemtrade
+    futures-market-snapshot --instruments all-pysystemtrade \
+      --cache /home/dev/data/fin/misc/cache/futures
 
 Then rebuild the cost and eligibility report without another IB request::
 
     futures-cost-risk \
       --snapshot-input /home/dev/data/fin/misc/results/futures_market_snapshot_<timestamp>.parquet \
+      --cache /home/dev/data/fin/misc/cache/futures \
       --initial-capital-usd 100000
 
 For the normal split pipeline, cache only the expensive historical rule and
 cost inputs::
 
     futures-rule-cache \
-      --snapshot-input /home/dev/data/fin/misc/results/futures_market_snapshot_<timestamp>.parquet
+      --snapshot-input /home/dev/data/fin/misc/results/futures_market_snapshot_<timestamp>.parquet \
+      --cache /home/dev/data/fin/misc/cache/futures
 
 ``futures-build-selection`` then owns capital, target-volatility, liquidity,
 and final candidate gates.  The older one-shot cost/screen commands remain as
@@ -3490,12 +3493,10 @@ def parse_args(
     argv=None,
     *,
     rule_cache_only: bool = False,
-    snapshot_only: bool = False,
 ):
     """Parse live-snapshot, rule-cache, or legacy one-shot arguments.
 
-    The shared parser preserves old command lines. Snapshot acquisition and
-    rule-cache construction require an explicit cache root so platform-specific
+    Every command requires an explicit cache root so platform-specific
     defaults cannot silently send writes to an unusable path. Selection-only
     policy options are hidden from ``futures-rule-cache --help`` because that
     artifact is intentionally independent of those values.
@@ -3582,8 +3583,7 @@ def parse_args(
     parser.add_argument(
         "--cache",
         type=Path,
-        default=DEFAULT_FUTURES_CACHE_ROOT,
-        required=rule_cache_only or snapshot_only,
+        required=True,
         help="Root directory for source-history and derived rule caches.",
     )
     parser.add_argument(
@@ -5445,11 +5445,7 @@ def run(
         dotenv_path=Path(__file__).resolve().parents[3] / ".env",
         override=False,
     )
-    args = parse_args(
-        argv,
-        rule_cache_only=rule_cache_only,
-        snapshot_only=snapshot_only,
-    )
+    args = parse_args(argv, rule_cache_only=rule_cache_only)
     setup_logger()
     if rule_cache_only and args.snapshot_input is None:
         raise ValueError(

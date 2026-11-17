@@ -82,7 +82,7 @@ def test_snapshot_universe_omits_static_execution_restrictions():
 
 
 def test_broad_audit_defaults_to_automatic_quote_fallback():
-    assert parse_args([]).market_data_type == "auto"
+    assert parse_args(["--cache", "cache/futures"]).market_data_type == "auto"
 
 
 def test_what_if_account_defaults_to_first_managed_account():
@@ -148,6 +148,8 @@ def test_ib_account_id_and_name_are_mutually_exclusive():
                 "U123456",
                 "--ib-account-name",
                 "taxable",
+                "--cache",
+                "cache/futures",
             ]
         )
 
@@ -164,7 +166,7 @@ def test_what_if_account_requires_at_least_one_managed_account():
 def test_what_if_margin_currency_defaults_to_usd_and_accepts_override():
     assert _what_if_margin_currency(None) == "USD"
     assert _what_if_margin_currency("chf") == "CHF"
-    assert parse_args([]).ib_account_currency == "USD"
+    assert parse_args(["--cache", "cache/futures"]).ib_account_currency == "USD"
 
 
 def test_what_if_margin_currency_requires_iso_code():
@@ -634,7 +636,7 @@ def test_delayed_quote_runs_dated_vol_and_spread_after_live_354(monkeypatch):
 
 
 def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
-    args = parse_args([])
+    args = parse_args(["--cache", "cache/futures"])
 
     assert args.cost_ewmac_fast_spans == (4, 8, 16, 32, 64)
     assert args.cost_ewmac_vol_span == 32
@@ -662,7 +664,11 @@ def test_broad_audit_defaults_to_reviewed_pool_ewmac_cost_baseline():
 
 
 def test_short_selection_aliases_are_adjustable():
-    args = parse_args(["--initial-capital-usd", "500000", "--target-vol", "0.25"])
+    args = parse_args([
+        "--cache", "cache/futures",
+        "--initial-capital-usd", "500000",
+        "--target-vol", "0.25",
+    ])
 
     assert args.affordability_capital_usd == pytest.approx(500_000.0)
     assert args.affordability_target_vol == pytest.approx(0.25)
