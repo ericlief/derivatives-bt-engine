@@ -2857,15 +2857,38 @@ class _WalkForwardSelectionProvider:
             str(detail["symbol"]): detail
             for detail in selection.final_score.details
         }
-        trial_sizing_by_symbol = {
-            str(trial["candidate"]): {
+        trial_sizing_by_symbol: dict[str, dict[str, object]] = {}
+        for trial in selection.trials:
+            symbol = str(trial["candidate"])
+            prior_detail = trial_sizing_by_symbol.get(symbol, {})
+            reason = str(trial.get("reason") or "")
+            feasible = bool(trial.get("feasible"))
+            own_hard_reason = next(
+                (
+                    part.strip()
+                    for part in reason.split(";")
+                    if part.strip().startswith(f"{symbol}:")
+                ),
+                None,
+            )
+            trial_sizing_by_symbol[symbol] = {
                 "max_position": trial.get("candidate_max_position"),
                 "average_position": trial.get(
                     "candidate_average_position"
                 ),
+                # A prior member can remain in the candidate universe yet be
+                # infeasible in every trial. Preserve its instrument-specific
+                # rejection instead of reducing the membership exit to the
+                # unhelpful ``not_selected_in_target_book`` label.
+                "hard_ineligible_reason": (
+                    own_hard_reason
+                    if not feasible and own_hard_reason
+                    else prior_detail.get("hard_ineligible_reason")
+                ),
+                "any_feasible": (
+                    bool(prior_detail.get("any_feasible")) or feasible
+                ),
             }
-            for trial in selection.trials
-        }
         allocations: dict[str, dict[str, float | int]] = {}
         for rank, symbol in enumerate(selection.selected, start=1):
             detail = detail_by_symbol[symbol]
@@ -3122,6 +3145,15 @@ class _WalkForwardSelectionProvider:
                     change_reason = (
                         "forecast_activity_hard_filter:"
                         f"{forecast_activity['forecast_activity_reason']}"
+                    )
+                elif (
+                    sizing_detail.get("hard_ineligible_reason")
+                    and not sizing_detail.get("any_feasible")
+                ):
+                    status = "ineligible"
+                    change_reason = (
+                        "hard_ineligible:"
+                        f"{sizing_detail['hard_ineligible_reason']}"
                     )
                 elif replacement is not None:
                     status = "replaced"

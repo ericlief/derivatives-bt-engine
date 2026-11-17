@@ -732,6 +732,99 @@ def test_walk_forward_forecast_probation_excludes_on_second_weak_review():
     )
 
 
+def test_review_instruments_explain_prior_member_position_floor_exit():
+    """A prior member rejected by the size floor keeps its selector reason."""
+    args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
+        "--selection-rebalance",
+        "monthly",
+        "--min-forecast-obs",
+        "2",
+        "--corr-min-rows",
+        "2",
+        "--weight-policy",
+        "equal",
+        "--selection-min-max-position",
+        "1",
+    ])
+    history_dates = [
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 31),
+        date(2024, 2, 1),
+    ]
+    reference_frames = {
+        symbol: pl.DataFrame({
+            "date": history_dates,
+            "ref_return_valid": [True] * 5,
+            "ref_net_pct": returns,
+            "daily_dvol": daily_dvol,
+            "fx_to_usd": [1.0] * 5,
+        }).lazy()
+        for symbol, returns, daily_dvol in (
+            (
+                "A",
+                [0.1, 0.2, -0.1, 0.1, 0.2],
+                [1.0, 1.0, 1.0, 10_000.0, 10_000.0],
+            ),
+            (
+                "B",
+                [-0.1, 0.1, 0.2, -0.2, 0.1],
+                [1.0] * 5,
+            ),
+        )
+    }
+    source_rows = {
+        symbol: {
+            "symbol": symbol,
+            "asset_cls": "equity",
+            "econ_subcls": symbol.lower(),
+            "econ_fam_id": symbol,
+            "initial_margin_to_ann_dvol": 1.0 / 16.0,
+            "ref_ann_rolls": 4.0,
+            "ref_spread_pts": 0.1,
+            "ref_config_comm_usd": 0.2,
+            "mult": 5.0,
+        }
+        for symbol in ("A", "B")
+    }
+    provider = _WalkForwardSelectionProvider(
+        review_dates=[date(2024, 1, 4), date(2024, 2, 2)],
+        source_rows=source_rows,
+        audit_by_symbol={
+            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B")
+        },
+        reference_frames=reference_frames,
+        live_tail_start_by_symbol={},
+        run_config={
+            "target_vol": 0.20,
+            "cost_lim_sr": 1.0,
+            "max_pct_mkt_volume": 1.0,
+            "liq_days": 256,
+        },
+        args=args,
+    )
+
+    first = provider(date(2024, 1, 4), 100_000.0)
+    second = provider(date(2024, 2, 2), 100_000.0)
+
+    assert first is not None and "A" in first
+    assert second is not None and "A" not in second
+    a_second = next(
+        row
+        for row in provider.review_instrument_rows
+        if row["selection_date"] == date(2024, 2, 2)
+        and row["symbol"] == "A"
+    )
+    assert a_second["selection_status"] == "ineligible"
+    assert a_second["max_position"] < 1.0
+    assert a_second["selection_note"].startswith(
+        "hard_ineligible:A:max_position_below_minimum"
+    )
+
+
 def test_review_instruments_omit_never_selected_forecast_rejections():
     """Compact reviews do not turn rejected challengers into removals."""
     args = parse_args([

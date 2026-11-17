@@ -1203,6 +1203,10 @@ not emitted as a membership transition; rejected challengers that reach the
 selector remain in the trial audit. Forecast hard filters that remove an
 incumbent remain in this compact report. The report leads with review identity
 and `sel_active`, followed by `symbol`, asset class, and economic subclass.
+An incumbent that remains in the candidate universe but fails a selector hard
+gate on every attempted path is also retained as `ineligible`; `sel_note`
+preserves the exact `hard_ineligible:<symbol>:<gate>` trial reason instead of
+collapsing the exit to `not_selected_in_target_book`.
 Allocation weights and their class and subclass limits follow the identity
 fields, then score diagnostics and other review details. Run-wide selection
 parameters are grouped at the right edge.
