@@ -3486,12 +3486,19 @@ def diagnose_instrument(
     return row
 
 
-def parse_args(argv=None, *, rule_cache_only: bool = False):
+def parse_args(
+    argv=None,
+    *,
+    rule_cache_only: bool = False,
+    snapshot_only: bool = False,
+):
     """Parse live-snapshot, rule-cache, or legacy one-shot arguments.
 
-    The shared parser preserves old command lines. Selection-only policy
-    options are hidden from ``futures-rule-cache --help`` because that artifact
-    is intentionally independent of those values.
+    The shared parser preserves old command lines. Snapshot acquisition and
+    rule-cache construction require an explicit cache root so platform-specific
+    defaults cannot silently send writes to an unusable path. Selection-only
+    policy options are hidden from ``futures-rule-cache --help`` because that
+    artifact is intentionally independent of those values.
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
@@ -3576,7 +3583,7 @@ def parse_args(argv=None, *, rule_cache_only: bool = False):
         "--cache",
         type=Path,
         default=DEFAULT_FUTURES_CACHE_ROOT,
-        required=rule_cache_only,
+        required=rule_cache_only or snapshot_only,
         help="Root directory for source-history and derived rule caches.",
     )
     parser.add_argument(
@@ -5082,6 +5089,40 @@ def _emit_market_snapshot(
     """Persist one reusable, full-precision live-input Parquet snapshot."""
     generated_at = datetime.now(REPORT_TIMEZONE)
     snapshot = _market_snapshot_frame(rows, args, generated_at)
+    required_columns = {
+        "ann_dvol",
+        "avg_daily_volume",
+        "spread_pts",
+    }
+    missing_columns = sorted(required_columns.difference(snapshot.columns))
+    valid_risk_rows = 0
+    if not missing_columns:
+        valid_risk_rows = snapshot.filter(
+            pl.col("ann_dvol").is_not_null()
+            & pl.col("ann_dvol").is_finite()
+            & (pl.col("ann_dvol") > 0)
+        ).height
+    if missing_columns or valid_risk_rows == 0:
+        errors = []
+        if "err" in snapshot.columns:
+            errors = (
+                snapshot.get_column("err")
+                .drop_nulls()
+                .unique()
+                .head(3)
+                .to_list()
+            )
+        details = (
+            f"missing columns={missing_columns}; "
+            if missing_columns
+            else ""
+        )
+        if errors:
+            details += f"sample row errors={errors}"
+        raise ValueError(
+            "refusing to save unusable market snapshot: "
+            f"valid annual dollar-volatility rows={valid_risk_rows}; {details}"
+        )
     output_base = args.snapshot_output
     if output_base is None:
         output_base = (
@@ -5189,8 +5230,19 @@ def _load_market_snapshot(
     }
     missing = sorted(required.difference(snapshot.columns))
     if missing:
+        errors = []
+        if "err" in snapshot.columns:
+            errors = (
+                snapshot.get_column("err")
+                .drop_nulls()
+                .unique()
+                .head(3)
+                .to_list()
+            )
+        details = f"; sample row errors={errors}" if errors else ""
         raise ValueError(
-            f"market snapshot is missing required fields {missing}"
+            f"market snapshot {resolved} is missing required fields "
+            f"{missing}{details}"
         )
     if max_age_days is not None:
         if max_age_days <= 0:
@@ -5393,7 +5445,11 @@ def run(
         dotenv_path=Path(__file__).resolve().parents[3] / ".env",
         override=False,
     )
-    args = parse_args(argv, rule_cache_only=rule_cache_only)
+    args = parse_args(
+        argv,
+        rule_cache_only=rule_cache_only,
+        snapshot_only=snapshot_only,
+    )
     setup_logger()
     if rule_cache_only and args.snapshot_input is None:
         raise ValueError(
