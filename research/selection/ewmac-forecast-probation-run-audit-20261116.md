@@ -50,18 +50,19 @@ probation overlay also reduced full-history fixed-cap results and created a
 large 2026 book-path cascade: three direct hard exclusions from the control
 book ultimately changed 15 symbols and reduced the final count from 19 to 10.
 
-The current result therefore supports one direct route-policy change and two
-probation sensitivities that need separate validation:
+The current result therefore supports three separate policy implications:
 
-1. Make an incumbent execution route sticky inside a continuously selected
-   economic family. The 2.5-contract preferred band should choose a route when
-   the family enters, rather than force annual full/micro substitutions.
+1. Give an incumbent execution route a two-threshold buffer inside a
+   continuously selected economic family. Keep 2.5 as the full-to-micro
+   boundary, but require materially more full-contract capacity before a micro
+   is promoted back to full.
 2. Test recovery hysteresis after a hard filter. This may reduce one-review
    exits and reentries, but it also keeps markets excluded longer and is not
    established as beneficial by this one saved path.
-3. Add a breadth-aware reconstruction pass when the greedy result misses the
-   configured minimum. This must search replacements while preserving every
-   hard gate; it must not simply re-admit hard-filtered markets.
+3. Replace single-path greedy construction with a small auditable beam when
+   constrained breadth matters. This must preserve every hard gate and compare
+   multiple feasible partial books before an early high-margin choice becomes
+   irreversible.
 
 ## ES/MES audit
 
@@ -112,21 +113,46 @@ penalties or tie-breaking, not the full/micro switch. Raising or lowering 2.5
 would therefore only move the crossing point. It would still permit annual
 churn around the new point, and changing 5.5 would not affect route selection.
 
-What is needed is a route *deadband* or fully sticky route, not a wider sizing
-target band. The strict sticky interpretation is:
+What is needed is a route *deadband*, not a wider sizing target band. An
+incumbent-aware interpretation is:
 
 | State | Route decision |
 |---|---|
 | Family enters or reenters | Choose full only if its equivalent maximum position is at least 2.5; otherwise choose micro. |
-| Incumbent full, family remains selected | Keep full while it clears hard feasibility, including the run's 1.0-contract floor. |
-| Incumbent micro, family remains selected | Keep micro; do not promote merely because the full equivalent crosses 2.5. |
+| Incumbent full, family remains selected | Keep full while its equivalent maximum position remains at least 2.5 and it clears the other hard gates. |
+| Incumbent micro, family remains selected | Promote only when the full equivalent clears a separate buffered upper threshold. |
 | Incumbent route fails a hard gate | Switch to a feasible sibling route or remove the family. |
 
-This makes the effective full-route retention region between 1.0 and 2.5 a
-deadband: the incumbent route, rather than a fresh comparison, determines the
-result. If recurring promotions are desired, they need a separate higher and
-persistent promotion hurdle; that threshold should be tested rather than
-silently borrowing `con_band_max=5.5`.
+Because 2.5 continuous contracts is the round-to-three preference boundary, a
+user-facing percentage buffer can be anchored to three full contracts:
+
+```text
+full_promotion_min = ceil(con_band_min) * (1 + promotion_buffer_pct / 100)
+```
+
+That gives 3.60 at 20%, 3.75 at 25%, and 4.50 at 50%. If the percentage were
+instead applied directly to 2.5, 25% and 50% would mean only 3.125 and 3.75;
+the anchor must therefore be explicit in the saved configuration and report.
+The lower demotion threshold remains 2.5, so a micro is retained between 2.5
+and the upper promotion threshold. `con_band_max=5.5` remains unrelated.
+
+The seven control-run micro-to-full promotions occurred at full-equivalent
+maximum positions of 2.536, 2.710, 2.889, 3.263, 3.587, 3.669, and 4.950. The
+saved-path screening is:
+
+| Promotion threshold | Historical promotions clearing it | Events clearing it |
+|---:|---:|---|
+| 2.500 current | 7 of 7 | all |
+| 3.125: 25% over 2.5 | 4 of 7 | WHEAT 1983, SP500 1989 and 1993, WHEAT 2017 |
+| 3.600: 20% over 3 | 2 of 7 | SP500 1989, WHEAT 2017 |
+| 3.750: 25% over 3 | 1 of 7 | WHEAT 2017 |
+| 4.500: 50% over 3 | 1 of 7 | WHEAT 2017 |
+
+This is a screen of observed events, not a counterfactual backtest. Preventing
+one promotion changes subsequent weights, margins, and route history, so exact
+switch and performance effects require reruns. It nevertheless shows that a
+25% buffer applied directly to 2.5 is relatively weak, while 3.6 is a useful
+intermediate sensitivity and 3.75–4.5 is highly sticky on this history.
 
 ### Historical defaults
 
@@ -212,6 +238,57 @@ Across all 54 reviews:
 
 The average effect looks small because 41 of 54 books are identical. The
 nonlinear effects are concentrated in a few reviews.
+
+### Book-count range and path dependence
+
+The count variation is materially wider than the probation effect. Across all
+54 annual reviews the control ranges from 7 to 22 markets and the probation
+run from 7 to 23. Since 2000, when the causal universe is much broader, the
+control still ranges from 10 to 22 and probation from 10 to 23:
+
+| Window and run | Minimum | 25th pct | Median | Mean | 75th pct | Maximum | Reviews below 15 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1973--2026 control | 7 | 11 | 13.5 | 14.59 | 18 | 22 | 28 of 54 |
+| 1973--2026 probation | 7 | 11 | 13 | 14.30 | 18 | 23 | 31 of 54 |
+| 2000--2026 control | 10 | 16 | 18 | 17.30 | 20 | 22 | 6 of 27 |
+| 2000--2026 probation | 10 | 15 | 18 | 16.93 | 20 | 23 | 7 of 27 |
+
+The recent probation counts are 18, 15, 10, 11, 21, 10, and 10 for
+2020--2026, while reviewed candidate counts are 136, 138, 143, 159, 165, 160,
+and 153. The largest annual count move is 11 markets: 21 to 10 in 2025. The
+same 2024-to-2025 collapse occurs in the no-probation control, so it is not
+caused by forecast filtering.
+
+The fixed 50% book-margin ceiling is nearly saturated throughout this period:
+
+| Review | Book count | Maximum-position margin | Remaining below $37,500 ceiling |
+|---:|---:|---:|---:|
+| 2020 | 18 | $37,483.50 | $16.50 |
+| 2021 | 15 | $37,395.85 | $104.15 |
+| 2022 | 10 | $37,434.37 | $65.63 |
+| 2023 | 11 | $36,803.90 | $696.10 |
+| 2024 | 21 | $37,309.38 | $190.62 |
+| 2025 | 10 | $37,302.41 | $197.59 |
+| 2026 probation | 10 | $37,449.45 | $50.55 |
+
+Thus a ten-market and a 21-market book can consume essentially the same margin.
+In the final 2026 probation book, V2TX and MBT consume $20,325.91, or 54% of
+the entire margin ceiling. The control path avoids V2TX; its two largest margin
+users consume $12,224.81, or 33%, and it reaches 19 markets. The configured
+`min_book_n=15` makes breadth additions mandatory only while the current
+partial book has a feasible next addition. The selector does not reconsider an
+earlier high-margin winner, so it can terminate in a local dead end despite a
+large candidate universe.
+
+This is evidence for multiple-path construction, not merely a terminal repair.
+A small beam should retain several partial books at every depth, including
+score-leading and margin-efficient alternatives. Terminal books should be
+ranked lexicographically by class deficit, subclass deficit, book-count
+deficit, and only then portfolio score. Beam pruning must preserve diversity
+in coverage and margin headroom; keeping only the top few scores can reproduce
+the same collapse. Width 1 must reproduce the current greedy baseline, and
+widths 4, 8, and 16 should be compared for count, membership, score, margin,
+runtime, and saved-path stability before choosing a default.
 
 ### 2026 path
 
@@ -382,7 +459,7 @@ run, so this did not cause the observed substitutions. Family-level state is
 still the correct model and avoids double-counting probation and hard filters
 for execution variants of the same market.
 
-### Test recovery hysteresis and add breadth-aware reconstruction
+### Test forecast recovery hysteresis and use multiple construction paths
 
 The current recovery rule is immediate: after a hard-filter review, one value
 at or above 0.50 resets the state and permits reentry. Test, rather than assume,
@@ -390,15 +467,16 @@ a stronger recovery rule such as 0.60 or two consecutive reviews above 0.50.
 Report exit, excluded duration, recovery state, and reentry by economic family
 so the churn and delayed-recovery tradeoff are visible.
 
-Breadth protection is a separate construction problem. If the primary greedy
-path finishes below `min_book_n`, run an explicit breadth-priority rebuild or
-backtracking pass over all activity-eligible candidates. It may replace members
-of the provisional book, but it must retain the forecast hard filters,
-one-contract floor, margin ceilings, history requirements, and hierarchy
-limits. Select the best feasible book that minimizes the coverage-deficit
-tuple, then apply score as a secondary objective. If 15 markets remain
-infeasible, retain the smaller book and persist that result as an unattainable
-target rather than weakening a hard gate.
+Breadth protection is a separate construction problem. Use a bounded beam over
+all activity-eligible candidates rather than trying to repair the terminal
+greedy book. Each path must retain the forecast hard filters, one-contract
+floor, margin ceilings, history requirements, hierarchy limits, and the route
+hysteresis above. Deduplicate identical family-route books and persist
+`path_id`, parent path, beam rank, coverage deficits, score, margin headroom,
+and prune reason. The public review should show the range of terminal feasible
+book counts and the selected path. If no retained path can reach 15 markets,
+keep the best smaller book and report the target as unattainable rather than
+weakening a hard gate.
 
 ## Source artifacts
 
