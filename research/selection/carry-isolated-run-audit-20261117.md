@@ -12,9 +12,15 @@ does not share the margin, probation, roll-cost, and other selector settings.
 The latest run should therefore be treated as the proposed isolated carry
 baseline, not as a controlled improvement over that earlier run.
 
+Post-audit implementation note: the probation admission defect described
+below was fixed on November 17 without overwriting this saved run. A first-
+weak challenger is now rejected before selector construction; only a current
+book member may use the one-review probation state. The saved artifacts remain
+the evidence for the pre-fix behavior.
+
 ## Findings
 
-1. **DJUSRE exposes a probation-entry policy defect.** Its 2026 rolling mean
+1. **DJUSRE exposed a probation-entry policy defect, now fixed in code.** Its 2026 rolling mean
    absolute forecast is 0.4446, below the 0.50 probation threshold. The code
    correctly labels it probationary, but only hard-filtered candidates are
    removed from the candidate pool. DJUSRE is consequently allowed to enter
@@ -31,13 +37,17 @@ baseline, not as a controlled improvement over that earlier run.
    selector has no family-route hysteresis, does not prefer full contracts,
    and has zero low/high contract-count penalties. Annual changes in
    volatility, cost, and book weights can therefore change the winning route.
-4. **The saved portfolio return series has a material validity defect.** There
+4. **The saved portfolio return series has a material calendar/validity defect.** There
    are 1,495 active-book dates on which one or more selected symbols have no
    cash-P&L row. Those dates are marked `ret_valid=false`, but the available
    partial P&L still changes cumulative equity. Economic P&L reconciles, but
-   strict-valid risk statistics omit a non-random $10,174.99 loss. This carry
-   baseline is not decision-ready for Sharpe or Calmar comparison until the
-   calendar/missing-row treatment is repaired.
+   strict-valid risk statistics omit a non-random $10,174.99 loss. A check of
+   pinned pysystemtrade commit `b4a25e6e` shows that PST does not drop the
+   entire portfolio day: it forward-fills an absent instrument price on its
+   business-day grid, gives that instrument zero P&L, keeps other markets'
+   P&L, and resamples account curves to `1B`. This carry baseline is not
+   decision-ready for Sharpe or Calmar comparison until its portfolio calendar
+   follows an equivalent explicit policy.
 
 The probation-entry behavior and return-validity issue are separate. Fixing
 the first changes selection. Fixing the second changes portfolio accounting
@@ -102,14 +112,12 @@ It was the only coverage-eligible choice in that active step. The final 2026
 book still had one class and three subclass coverage deficits, so admitting
 the weak candidate did not make the hierarchy fully feasible.
 
-The behavior follows `_forecast_activity_at_review`: a value below 0.50
-remains eligible on its first weak review, while a value below 0.25 or a
-second consecutive weak review is hard filtered. The provider drops only
-`forecast_activity_hard_filter` candidates. This is inconsistent with the
-earlier probation design note, which specified that a probationary candidate
-must not satisfy minimum-book or coverage requirements and may only be
-retained as an explicitly reported fallback after healthy candidates are
-exhausted.
+The saved behavior follows `_forecast_activity_at_review`: a value below 0.50
+receives a first-weak probation state, while a value below 0.25 or a second
+consecutive weak review is hard filtered. At the time of this run, the
+provider dropped only `forecast_activity_hard_filter` candidates. This was
+inconsistent with the earlier probation design note, which specified that a
+probationary candidate must not satisfy minimum-book or coverage requirements.
 
 This is not unique to DJUSRE. The run has 24 selected probation market-years:
 19 retained incumbents and five new entrants.
@@ -136,13 +144,13 @@ is the one that controlled selection.
 
 ### Required policy correction
 
-The conservative correction is to exclude a probationary non-incumbent from
-both normal ranking and coverage/minimum-book satisfaction. A first weak
-review may retain an incumbent, with an explicit `retained_probation` reason.
-If a fallback mode is kept, it should be a distinct last-resort stage and
-must not count as healthy coverage. No saved-run counterfactual is inferred
-here: removing these entrants changes the subsequent book and must be tested
-by a new sensitivity run.
+The implemented correction excludes a probationary non-incumbent before
+selector construction, covering normal ranking, hierarchy coverage, and
+minimum-book satisfaction uniformly. A first weak review may retain an
+incumbent and reports the `forecast_probation` note; a second weak review or
+an immediate-hard value removes it. No fallback admits weak challengers. No
+saved-run counterfactual is inferred here: removing these entrants changes the
+subsequent book and must be tested by a new sensitivity run.
 
 ## Micro agriculture audit
 
@@ -317,7 +325,7 @@ Costs do not by themselves explain the negative equity and metals results:
 equity gross P&L is −$35,924 before $5,346 of cost, while metals gross P&L is
 −$11,262 before $12,287 of cost.
 
-## Return-validity defect
+## Portfolio calendar and return validity
 
 Of the selected-book dates, 1,495 have `ret_valid=false`. No cash row that is
 present and active has `pnl_valid=false`; instead, some selected symbol-date
@@ -328,10 +336,28 @@ percentage points, to the saved equity curve.
 The missing-date effect is not confined to the unfinished tail. It appears
 from 1972 onward. The most affected recent years are 2024, with 249 dates and
 −12.73 percentage points; 2025, with 83 dates and −5.79 points; and 2023,
-with 76 dates and −2.60 points. The concentration by weekday and the presence
-of Saturday rows indicate a multi-exchange calendar-union issue, but the
-saved reports do not prove whether each absence is a legitimate market
-closure or a true missing-data gap.
+with 76 dates and −2.60 points. In 2026, 25 of the 54 invalid dates are
+Saturdays carrying only the SGX `IRON`/`SCI` and `FTSECHINAA`/`XINA50` rows.
+The raw IB database contains those Saturday bars. PST's `1B` account-curve
+resample would merge a Saturday amount into the preceding Friday rather than
+count it as a separate annualized observation.
+
+The relevant PST implementation is explicit:
+
+- `calculate_pandl` concatenates positions and prices, forward-fills both,
+  differences the filled price, and converts residual null returns to zero;
+- portfolio P&L concatenates instrument curves and sums across columns, so a
+  closed market does not erase another market's return;
+- `accountCurve` calls `resample("1B").sum()`, normalizing the portfolio to a
+  business-day series.
+
+Therefore excluding every partial-book day is not a valid PST-parity repair.
+It discards genuine returns from open markets and, in this run, removes a net
+loss. The historical repair should normalize source dates to the intended
+session/business date, add explicit zero contributions for verified closed
+markets, and retain a separate invalid marker for genuine data gaps. An
+unfinished final tail is different and should be excluded after the last
+complete endpoint.
 
 Strict-valid returns total 716.52%, while the complete economic cash series
 totals 702.95%. Therefore:
@@ -340,8 +366,35 @@ totals 702.95%. Therefore:
   reconcile to equity;
 - Sharpe and Calmar below use only `ret_valid=true` dates and are diagnostic;
 - dropping invalid dates is not a valid repair because it removes a net loss;
-- a repair must create explicit zero rows only for verified market closures
-  and preserve invalid status for genuine missing data.
+- a repair must create explicit zero rows only for verified market closures,
+  normalize weekend/session labels before annualizing risk, and preserve
+  invalid status for genuine missing data.
+
+### Forecast gaps and the 2026 endpoint
+
+Forecast handling is causal and conservative, but the calendar issue is not
+irrelevant to forecast speed. Carry is computed only from same-session curve
+observations, restarts its EWMA segment at a source change, invalid carry row,
+or gap longer than seven calendar days, and persists a forecast for no more
+than seven days while the executable contract is unchanged. Missing market
+rows therefore do not leak future values or invent cross-gap P&L.
+
+However, this implementation applies the 5/20/60/120 EWMAs over observed
+rows. PST first places daily inputs on a business-day index. The extra SGX
+Saturday rows consequently count as extra smoothing observations in the
+stitched tail and should be session-normalized for exact span semantics.
+Ordinary exchange holidays and short absences are otherwise safe for forecast
+causality; their effect is a small timing difference rather than missing cash
+P&L.
+
+The saved 2026 tail is complete through November 11 for cash P&L: all 16 book
+members have valid market P&L on that date. It is fully signal-populated only
+through November 10; six members have a null carry forecast on November 11,
+while their prior buffered contracts continue to earn valid P&L. On November
+12 only `SCI` and `XINA50` are present, and November 13 and 16 contain none of
+the 16 selected markets. Performance comparisons must therefore stop at
+November 11, and a current live signal snapshot should not treat the saved
+November 12–16 tail as complete.
 
 ## Selection breadth and constraints
 
@@ -368,7 +421,7 @@ weight 49.99%, and maximum book margin $34,235.71. It is:
 equity curve. `Strict-valid return`, Sharpe, and Calmar exclude dates marked
 invalid. Calmar is the annualized strict-valid arithmetic mean divided by the
 within-year drawdown on the complete saved equity curve. The starred columns
-are diagnostics until the return-validity defect is fixed.
+are diagnostics until the portfolio calendar/validity treatment is fixed.
 
 | Year | Net return | Strict-valid return | Invalid dates / return | Gross P&L | Costs | Sharpe* | Max DD | Calmar* |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -431,16 +484,16 @@ are diagnostics until the return-validity defect is fixed.
 ## Conclusion and primary artifacts
 
 The carry forecast, span-specific pooled turnover estimates, measured combined
-turnover, trade costs, and roll costs are wired into the saved run. The
-current probation implementation is not suitable as the intended entry
-filter: it permits a weak first-review candidate to enter and satisfy
-coverage. The micro-ag sizing is correct, although route churn remains an
-open policy choice because no route hysteresis or switching penalty is active.
+turnover, trade costs, and roll costs are wired into the saved run. The saved
+run demonstrates the former weak-challenger admission bug; current code now
+restricts probation to incumbents. The micro-ag sizing is correct, although
+route churn remains an open policy choice because no route hysteresis or
+switching penalty is active.
 
-The proposed baseline also has to be rerun after the return-calendar issue is
-resolved. Until then, the economically reconciled P&L is useful for debugging,
-but the 0.748 Sharpe and 0.504 Calmar should not be used to decide whether
-carry improves the fixed $75,000 book.
+The proposed baseline should be rerun after probation admission and the
+return-calendar issue are both resolved. Until then, the economically
+reconciled P&L is useful for debugging, but the 0.748 Sharpe and 0.504 Calmar
+should not be used to decide whether carry improves the fixed $75,000 book.
 
 Primary evidence is in the run's `carry_selection_review_instruments`,
 `review_trials`, `review_trial_allocations`, `review_final_allocations`,

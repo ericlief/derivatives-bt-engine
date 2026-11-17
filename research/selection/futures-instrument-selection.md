@@ -1051,10 +1051,13 @@ one across EWMAC, return TSMOM, Goulding, and Carry, so the default thresholds
 share one interpretation.
 
 The default probation minimum is `0.50` and the immediate hard minimum is
-`0.25`. A market below `0.50` remains eligible at its first weak review but is
-marked probationary. A second consecutive weak review hard-filters it. A
-market below `0.25` is hard-filtered immediately, while a review at or above
-`0.50` resets its weak-review count. Configure the policy with:
+`0.25`. At its first review below `0.50`, an existing book member may remain
+eligible for one review and is marked probationary. A probationary challenger
+is not admitted to the candidate universe and therefore cannot satisfy a
+minimum-book or coverage requirement. A second consecutive weak review
+hard-filters the incumbent as well. A market below `0.25` is hard-filtered
+immediately, while a review at or above `0.50` resets its weak-review count.
+Configure the policy with:
 
 ```text
 --selection-forecast-activity-filter
@@ -1067,11 +1070,12 @@ market below `0.25` is hard-filtered immediately, while a review at or above
 The feature is disabled by default so old runs reproduce unchanged. The
 review-instrument report persists the causal window, observation count,
 rolling mean absolute forecast, weak-review count, probation/hard flags, and
-reason. Hard-filtered rows are retained in that audit even though they do not
-enter the candidate universe. The static forecast audit also records the
-latest trailing diagnostic, but scheduled historical selection always
-recomputes it from the information available at each review; the latest value
-is never propagated backward.
+reason for current or immediately prior members. A probationary challenger
+that has never been a member is visible in the review-level probation count
+and static forecast audit, but not as a membership transition or selector
+trial because admission rejects it first. Scheduled historical selection
+always recomputes the state from information available at each review; the
+latest static value is never propagated backward.
 
 ##### Membership rank band
 

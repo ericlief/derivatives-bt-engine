@@ -236,10 +236,12 @@ def _forecast_activity_at_review(
     so the thresholds are comparable across the supported signal families.
 
     A value below ``hard_min`` is excluded immediately. A value below
-    ``probation_min`` remains eligible for its first weak review and is hard
-    filtered after ``probation_reviews`` consecutive weak reviews. A healthy
-    review resets the consecutive count. The returned mapping is suitable for
-    direct inclusion in forecast and scheduled-review audit reports.
+    ``probation_min`` receives a first-review probation state and is hard
+    filtered after ``probation_reviews`` consecutive weak reviews. Candidate
+    admission separately restricts that probation state to incumbents, so a
+    weak challenger cannot enter merely to fill book or coverage targets. A
+    healthy review resets the consecutive count. The returned mapping is
+    suitable for direct inclusion in forecast and scheduled-review audits.
     """
     base = {
         "forecast_activity_lookback_sessions": lookback_sessions,
@@ -1530,7 +1532,8 @@ def parse_args(argv=None, *, complete_default: bool = False):
         default=DEFAULT_FORECAST_PROBATION_MIN,
         help=(
             "Rolling mean absolute normalized forecast below which a market "
-            "enters probation (default: 0.50)."
+            "enters incumbent-only probation; challengers are rejected "
+            "(default: 0.50)."
         ),
     )
     parser.add_argument(
@@ -2447,6 +2450,25 @@ class _WalkForwardSelectionProvider:
                     review_date,
                     symbol,
                     forecast_activity["forecast_activity_reason"],
+                    forecast_activity["rolling_mean_abs_forecast"],
+                    forecast_activity[
+                        "forecast_activity_weak_review_count"
+                    ],
+                )
+                continue
+            if (
+                forecast_activity["forecast_activity_probation"]
+                and symbol not in self.prior_selected
+            ):
+                # Probation is retention hysteresis, not an entry state.  Keep
+                # weak challengers out of every selector phase so they cannot
+                # satisfy minimum-book or coverage requirements.
+                logger.debug(
+                    "walk_forward_selection candidate_rejected date=%s "
+                    "symbol=%s reason=forecast_activity_probation_non_incumbent "
+                    "rolling_mean_abs_forecast=%s weak_review_count=%s",
+                    review_date,
+                    symbol,
                     forecast_activity["rolling_mean_abs_forecast"],
                     forecast_activity[
                         "forecast_activity_weak_review_count"

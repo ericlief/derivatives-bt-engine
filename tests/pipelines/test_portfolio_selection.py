@@ -634,8 +634,8 @@ def test_walk_forward_selection_uses_uniform_reference_eligibility():
     assert all(row["hist_instr_code"] is None for row in first_review_rows)
 
 
-def test_walk_forward_forecast_probation_excludes_on_second_weak_review():
-    """The provider advances weak-review state without using future forecasts."""
+def test_walk_forward_forecast_probation_rejects_weak_challenger():
+    """First-weak challengers stay out while their causal streak advances."""
     args = parse_args([
         "--signal-model",
         "multi_ewmac",
@@ -713,21 +713,129 @@ def test_walk_forward_forecast_probation_excludes_on_second_weak_review():
     )
 
     first = provider(date(2024, 1, 4), 1_000.0)
+    assert first is not None and "B" not in first
+    assert "B" not in provider.latest_candidates
+
     second = provider(date(2024, 2, 2), 1_000.0)
 
-    assert first is not None and "B" in first
     assert second is not None and "B" not in second
     assert provider.review_rows[0]["forecast_activity_probation_count"] == 1
     assert provider.review_rows[1]["forecast_activity_hard_filter_count"] == 1
+    assert not any(
+        row["symbol"] == "B" for row in provider.review_instrument_rows
+    )
+
+
+def test_walk_forward_forecast_probation_lets_incumbent_breathe_once():
+    """A healthy entrant may survive its first weak review, but not its second."""
+    args = parse_args([
+        "--signal-model",
+        "multi_ewmac",
+        "--selection-rebalance",
+        "monthly",
+        "--min-forecast-obs",
+        "2",
+        "--corr-min-rows",
+        "2",
+        "--weight-policy",
+        "equal",
+        "--selection-forecast-activity-filter",
+        "--selection-forecast-lookback-sessions",
+        "2",
+        "--selection-forecast-probation-min",
+        "0.5",
+        "--selection-forecast-hard-min",
+        "0.25",
+        "--selection-forecast-probation-reviews",
+        "2",
+        "--max-instr-margin-pct",
+        "15",
+    ])
+    history_dates = [
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 31),
+        date(2024, 2, 1),
+        date(2024, 2, 29),
+        date(2024, 3, 1),
+    ]
+    reference_frames = {
+        symbol: pl.DataFrame({
+            "date": history_dates,
+            "comb_fcst": forecasts,
+            "fcst_valid": [True] * len(history_dates),
+            "ref_return_valid": [True] * len(history_dates),
+            "ref_net_pct": returns,
+            "daily_dvol": [10.0] * len(history_dates),
+            "fx_to_usd": [1.0] * len(history_dates),
+        }).lazy()
+        for symbol, forecasts, returns in (
+            ("A", [1.0] * 7, [0.1, 0.2, -0.1, 0.1, 0.2, -0.2, 0.1]),
+            ("B", [1.0, 1.0, 1.0, 0.4, 0.4, 0.4, 0.4],
+             [-0.1, 0.1, 0.2, -0.2, 0.1, 0.2, -0.1]),
+        )
+    }
+    source_rows = {
+        symbol: {
+            "symbol": symbol,
+            "asset_cls": "equity",
+            "econ_subcls": symbol.lower(),
+            "econ_fam_id": symbol,
+            "initial_margin_to_ann_dvol": 10.0 / 160.0,
+            "ref_ann_rolls": 4.0,
+            "ref_spread_pts": 0.1,
+            "ref_config_comm_usd": 0.2,
+            "mult": 5.0,
+        }
+        for symbol in ("A", "B")
+    }
+    provider = _WalkForwardSelectionProvider(
+        review_dates=[
+            date(2024, 1, 4),
+            date(2024, 2, 2),
+            date(2024, 3, 2),
+        ],
+        source_rows=source_rows,
+        audit_by_symbol={
+            symbol: {"comb_turnover": 1.0} for symbol in ("A", "B")
+        },
+        reference_frames=reference_frames,
+        live_tail_start_by_symbol={},
+        run_config={
+            "target_vol": 0.20,
+            "cost_lim_sr": 0.01,
+            "max_pct_mkt_volume": 1.0,
+            "liq_days": 256,
+        },
+        args=args,
+    )
+
+    first = provider(date(2024, 1, 4), 1_000.0)
+    second = provider(date(2024, 2, 2), 1_000.0)
+    third = provider(date(2024, 3, 2), 1_000.0)
+
+    assert first is not None and "B" in first
+    assert second is not None and "B" in second
+    assert third is not None and "B" not in third
     b_second = next(
         row
         for row in provider.review_instrument_rows
         if row["selection_date"] == date(2024, 2, 2)
         and row["symbol"] == "B"
     )
-    assert b_second["selection_status"] == "ineligible"
-    assert b_second["forecast_activity_weak_review_count"] == 2
-    assert b_second["selection_note"].startswith(
+    assert b_second["selection_status"] == "retained"
+    assert b_second["forecast_activity_probation"] is True
+    assert b_second["selection_note"].startswith("forecast_probation:")
+    b_third = next(
+        row
+        for row in provider.review_instrument_rows
+        if row["selection_date"] == date(2024, 3, 2)
+        and row["symbol"] == "B"
+    )
+    assert b_third["selection_status"] == "ineligible"
+    assert b_third["forecast_activity_weak_review_count"] == 2
+    assert b_third["selection_note"].startswith(
         "forecast_activity_hard_filter:"
     )
 
