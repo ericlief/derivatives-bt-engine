@@ -3063,17 +3063,13 @@ class _WalkForwardSelectionProvider:
             "coverage_satisfied": selection.coverage_satisfied,
             "coverage_reason": selection.coverage_reason,
         })
-        forecast_activity_audit_symbols = {
-            symbol
-            for symbol, value in forecast_activity_by_symbol.items()
-            if value["forecast_activity_probation"]
-            or value["forecast_activity_hard_filter"]
-        }
-        for symbol in sorted(
-            selected_symbols
-            | removed_symbols
-            | forecast_activity_audit_symbols
-        ):
+        # This is the compact membership report, not a second candidate audit.
+        # Keep current and prior book members here; otherwise every weak or
+        # pre-history forecast in the source universe looks like a removal even
+        # when the instrument never participated in the book. Rejected
+        # challengers retain their forecast and feasibility diagnostics in the
+        # trial reports.
+        for symbol in sorted(selected_symbols | removed_symbols):
             active = symbol in selected_symbols
             candidate = candidate_by_symbol.get(symbol)
             allocation = allocations.get(symbol)

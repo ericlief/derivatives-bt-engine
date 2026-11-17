@@ -1197,10 +1197,15 @@ report: it has one row per review and involved instrument, with `added`,
 `retained`, or `removed` status, active and greedy preference ranks, weights,
 classification,
 historical dollar volatility, and the cost inputs used by that review. The
-report leads with review identity and `sel_active`, followed by `symbol`,
-asset class, and economic subclass. Allocation weights and their class and
-subclass limits follow the identity fields, then score diagnostics and other
-review details. Run-wide selection parameters are grouped at the right edge.
+involved set is the union of the accepted and immediately prior books. A
+probationary or hard-filtered challenger that was never a member is therefore
+not emitted as a membership transition; rejected challengers that reach the
+selector remain in the trial audit. Forecast hard filters that remove an
+incumbent remain in this compact report. The report leads with review identity
+and `sel_active`, followed by `symbol`, asset class, and economic subclass.
+Allocation weights and their class and subclass limits follow the identity
+fields, then score diagnostics and other review details. Run-wide selection
+parameters are grouped at the right edge.
 `sel_rank_buf_symbols` is null when rank membership hysteresis is disabled.
 The instrument-level `sel_elig_hyst_applied` and
 `sel_elig_hyst_reason` fields identify incumbent rows retained by the relaxed
