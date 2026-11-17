@@ -1787,6 +1787,7 @@ def build_portfolio_equity_curve(
     initial_capital_usd: float,
     capital_mode: str = "compounded",
     target_volatility: float | None = None,
+    book_symbols_by_date: dict[object, tuple[str, ...]] | None = None,
 ) -> pl.DataFrame:
     """Aggregate selected-book cash P&L into gross and net equity curves.
 
@@ -1807,16 +1808,19 @@ def build_portfolio_equity_curve(
         Optional annual portfolio volatility target as a decimal fraction.
         Persisting it lets notebook plots compare realized volatility with the
         target used to size this run.
+    book_symbols_by_date
+        Optional selected-book membership by date. This preserves constituents
+        in the portfolio curve when a symbol has no cash-P&L row for a date.
 
     Returns
     -------
     polars.DataFrame
         One row per date with summed daily USD cash flows, daily returns based
         on the configured capital policy, cumulative returns relative to initial
-        capital, cost contributions, equity paths, and coverage counts. A
-        portfolio return is valid only when every economically active row has
-        complete instrument P&L. When ``target_volatility`` is supplied, each
-        date also carries that constant annualized sizing target.
+        capital, cost contributions, equity paths, and coverage counts. A return
+        is invalid when a selected book member lacks valid daily P&L. When
+        ``target_volatility`` is supplied, each date also carries that constant
+        annualized sizing target.
 
     Notes
     -----
@@ -1916,6 +1920,92 @@ def build_portfolio_equity_curve(
             ],
         )
         .sort("date")
+    )
+    if book_symbols_by_date is not None:
+        membership_rows = [
+            {
+                "date": date_value,
+                "portfolio_instruments_from_book": ",".join(symbols),
+                "portfolio_instrument_count_from_book": len(symbols),
+            }
+            for date_value, symbols in book_symbols_by_date.items()
+        ]
+        if membership_rows:
+            membership = pl.DataFrame(
+                membership_rows,
+                schema_overrides={
+                    "date": cash_pnl_long.schema["date"],
+                    "portfolio_instruments_from_book": pl.Utf8,
+                    "portfolio_instrument_count_from_book": pl.Int64,
+                },
+            )
+            if "sel_active" in cash_pnl_long.columns:
+                observed_book_rows = (
+                    cash_pnl_long
+                    .filter(pl.col("sel_active").fill_null(False))
+                    .group_by("date")
+                    .agg(
+                        pl.col("symbol").n_unique().alias(
+                            "portfolio_observed_book_instruments"
+                        )
+                    )
+                )
+                membership = membership.join(
+                    observed_book_rows, on="date", how="left"
+                ).with_columns(
+                    pl.col("portfolio_observed_book_instruments")
+                    .fill_null(0)
+                    .cast(pl.Int64)
+                )
+            else:
+                membership = membership.with_columns(
+                    pl.lit(0, dtype=pl.Int64).alias(
+                        "portfolio_observed_book_instruments"
+                    )
+                )
+            daily = (
+                daily.join(membership, on="date", how="left")
+                .with_columns(
+                    pl.coalesce(
+                        "portfolio_instruments_from_book",
+                        "portfolio_instruments",
+                    ).alias("portfolio_instruments"),
+                    pl.coalesce(
+                        "portfolio_instrument_count_from_book",
+                        "portfolio_instrument_count",
+                    ).alias("portfolio_instrument_count"),
+                    pl.when(
+                        pl.col(
+                            "portfolio_instrument_count_from_book"
+                        ).is_not_null()
+                    )
+                    .then(
+                        pl.col(
+                            "portfolio_instrument_count_from_book"
+                        )
+                        - pl.col(
+                            "portfolio_observed_book_instruments"
+                        ).fill_null(0)
+                    )
+                    .otherwise(0)
+                    .clip(lower_bound=0)
+                    .alias("missing_book_instruments"),
+                )
+                .with_columns(
+                    (
+                        pl.col("portfolio_invalid_pnl_instruments")
+                        + pl.col("missing_book_instruments")
+                    ).alias("portfolio_invalid_pnl_instruments"),
+                )
+                .drop(
+                    "portfolio_instruments_from_book",
+                    "portfolio_instrument_count_from_book",
+                    "portfolio_observed_book_instruments",
+                    "missing_book_instruments",
+                )
+            )
+    daily = (
+        daily
         .with_columns(
             pl.lit(initial_capital_usd).alias("initial_capital_usd"),
             pl.lit(capital_mode).alias("backtest_capital_mode"),
