@@ -5683,11 +5683,37 @@ def _run_complete_selection(
         how="left",
         validate="1:1",
     )
+    book_symbols_by_date = None
+    if allocation_provider is not None:
+        book_by_review_date: dict[date, tuple[str, ...]] = {}
+        for review_row in allocation_provider.review_final_allocation_rows:
+            review_date = review_row.get("selection_date")
+            book = str(review_row.get("book") or "")
+            if review_date is not None and book:
+                book_by_review_date[review_date] = tuple(
+                    sorted(symbol for symbol in book.split(",") if symbol)
+                )
+        ordered_review_dates = sorted(book_by_review_date)
+        book_symbols_by_date = {}
+        review_index = -1
+        for curve_date in sorted(
+            set(cash_pnl_long.get_column("date").drop_nulls().to_list())
+        ):
+            while (
+                review_index + 1 < len(ordered_review_dates)
+                and ordered_review_dates[review_index + 1] <= curve_date
+            ):
+                review_index += 1
+            if review_index >= 0:
+                book_symbols_by_date[curve_date] = book_by_review_date[
+                    ordered_review_dates[review_index]
+                ]
     portfolio_curve = build_portfolio_equity_curve(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),
         capital_mode=args.backtest_capital_mode,
         target_volatility=float(run_config["target_vol"]),
+        book_symbols_by_date=book_symbols_by_date,
     )
     audit_path = output_dir / f"{report_prefix}_selection_forecast_audit_{stamp}.parquet"
     trials_path = output_dir / f"{report_prefix}_selection_trials_{stamp}.parquet"
