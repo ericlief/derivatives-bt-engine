@@ -58,13 +58,16 @@ same books.
 
 The saved Parquet results above predate the calendar fix and retain their
 original returns and validity flags. The current implementation in
-`calculations/pnl.py` now follows the inspected PST account-curve convention:
-it assigns weekend P&L to Friday, emits every weekday between the first and
-last observations, treats an absent instrument row as zero P&L, and preserves
-invalidity for an observed active row whose P&L inputs are incomplete. Static
-and walk-forward books both provide membership across empty weekdays. The
-saved run has not been regenerated, so its reported calendar statistics are
-still pre-fix.
+`calculations/pnl.py` follows the inspected PST account-curve convention:
+for any weekend-dated P&L rows it assigns amounts to Friday, emits every
+weekday between the first and last observations, treats an absent instrument
+row as zero P&L, and preserves invalidity for an observed active row whose
+P&L inputs are incomplete. The PST and IB history builders canonicalize
+weekend observations to Monday before producing daily prices and point
+changes, so regenerated P&L from those histories is dated Monday. Static and
+walk-forward books both provide membership across empty weekdays. The saved
+run has not been regenerated, so its reported calendar statistics are still
+pre-fix.
 
 ## Saved parameters
 
