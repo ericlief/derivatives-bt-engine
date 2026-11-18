@@ -5,7 +5,7 @@ History schema: v5; Carver source commit: `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b8
 
 Both providers use contract-consistent arithmetic returns: the current selected-contract price divided by its prior same-contract reference, including the matched forward quote on a Carver roll. Invalid nonpositive references are flagged rather than coerced. Valid returns are compounded into positive signal indices before trend forecasts are computed.
 
-Carver source timestamps are preserved, while Sunday observations are assigned to the following Monday trading session during sidecar import.
+This saved report predates the current importer convention. Current schema v7 preserves Carver source timestamps and assigns both Saturday and Sunday observations to the preceding Friday business date, matching PST account-curve buckets.
 Daily volatility is the annualized trailing 20-session standard deviation of normalized returns. The tables report every tested -1/0/+1 calendar-day correlation for both returns and volatility.
 
 Every mapping remains `candidate`. Automated recommendations are triage only, not mapping approvals.

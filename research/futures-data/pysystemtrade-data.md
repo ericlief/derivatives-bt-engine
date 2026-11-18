@@ -51,7 +51,7 @@ The deterministic raw-data importer is implemented in
 `pysystemtrade-import` CLI. It writes the independently rebuildable sidecar at
 the recommended path; it does not attach to or write the Globex database.
 
-The current reference sidecar uses schema v5 and source commit
+The original report snapshot used sidecar schema v5 and source commit
 `b4a25e6e1e33a54a3ecfb45c0f6db5e2b60b84f8` and produced:
 
 | Build result | Value |
@@ -64,8 +64,12 @@ The current reference sidecar uses schema v5 and source commit
 | Instruments | 252 |
 | Source range | 1969-12-02 23:00 to 2024-03-29 05:00 |
 
-The materialized QA results reproduce the session-normalized statistics in
-this document: 89.5% mean, 98.9% median, and 90.0% weighted carry-day coverage;
+The current sidecar was rebuilt at schema v7 from the same source commit using
+Friday buckets for Saturday and Sunday observations; counts below describe the
+original report snapshot.
+
+The original schema v5 QA results reproduced the session-normalized statistics
+in this report: 89.5% mean, 98.9% median, and 90.0% weighted carry-day coverage;
 205 instruments at or above 90% and 26 below 50%; 40 adjusted series with
 non-positive history; 152,992 null adjusted rows; and five non-positive raw
 price rows. A second clean build was compared with `EXCEPT ALL` in both
@@ -73,15 +77,15 @@ directions across the manifest, every raw table, and every QA table. It had no
 logical differences. Import time is intentionally the sole run-specific
 metadata value.
 
-Schema v3 preserved every original `source_timestamp` and added a normalized
-`trade_date` to adjusted and multiple-price rows. Sunday timestamps are assigned
-to Monday's futures trading session. The current build shifted 34,299 adjusted
-rows and 34,301 multiple-price rows; `qa.session_date_normalization` records
-those counts. It also materializes stream-specific daily tables after session
-normalization. Each stream selects its last complete observation independently:
-normally the 23:00 row, otherwise the final complete timestamp for that session.
-This prevents an incomplete late carry row from displacing an earlier valid
-same-timestamp price/carry pair.
+Schema v3 first added normalized `trade_date` values while retaining every
+original `source_timestamp`. That version assigned Sunday timestamps to
+Monday. The current schema v7 assigns both Saturday and Sunday rows to the
+preceding Friday business date, matching PST account-curve bins; current QA
+counts are recorded in `qa.session_date_normalization`. Stream-specific daily
+tables select their last complete observation independently: normally the
+23:00 row, otherwise the final complete timestamp in that Friday or weekday
+bucket. This keeps raw roll inputs and carry/mark projections on the same
+business dates while preserving source timestamps for audit.
 
 Schema v5 adds the repository-owned `ref.instrument_classification` table.
 The importer requires one canonical lowercase `asset_class` and
@@ -187,14 +191,14 @@ coverage gaps, exchange-holiday differences, and other source-specific
 omissions. Silver's separate one-calendar-day lead/lag result also remains
 after Sunday normalization.
 
-The Sunday artifact is resolved in importer schema v3. `raw.adjusted_prices` and
-`raw.multiple_prices` retain the original timestamp and store Sunday rows with
-the following Monday `trade_date`. Materialized `daily.adjusted_prices`,
-`daily.marks`, and `daily.carry` then select the last complete observation per
-normalized session, and the history provider recomputes returns and rolls from
-those tables. `HISTORY_SCHEMA_VERSION=3` invalidates the old Carver and
-source-neutral Globex history caches; the Globex database itself was not
-changed.
+The original Sunday mismatch was resolved in importer schema v3 by moving
+Sunday rows into Monday. The current importer schema v7 uses the PST account
+curve's business-day convention: Saturday and Sunday rows receive the preceding
+Friday `trade_date`, while `source_timestamp` remains unchanged. The raw roll
+observations and materialized daily marks/carry therefore share Friday buckets;
+the history provider rebuilds roll-neutral returns and Panama from those
+aligned raw observations. `HISTORY_SCHEMA_VERSION=15` invalidates older history
+caches; source databases are not rewritten in place.
 
 The EOD-normalized, Silver-aligned report contains 1,325 Carver-only dates and
 747 Globex-only dates across the 14 mappings. The six-row reduction relative to

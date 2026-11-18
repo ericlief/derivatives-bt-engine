@@ -197,7 +197,7 @@ DEFAULT_FORECAST_PROBATION_REVIEWS = 2
 # artifact-specific identity version for narrower changes so stable expensive
 # inputs remain reusable. The base version is part of the directory and content
 # identity, allowing old variants to remain without being accepted as current.
-SELECTION_BACKTEST_CACHE_VERSION = 2
+SELECTION_BACKTEST_CACHE_VERSION = 3
 CASH_PNL_CACHE_VERSION = 2
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1

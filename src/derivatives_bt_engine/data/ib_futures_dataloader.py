@@ -826,9 +826,9 @@ def build_ib_contract_history(
     )
 
     # Normalize session dates before contract selection. Weekend observations
-    # become available on the following Monday; if that contract also has a
-    # Monday bar, its later close owns the canonical session. Keep the source
-    # DB untouched so the original exchange dates remain auditable.
+    # share the preceding Friday business-date bucket; if the contract has
+    # multiple observations in that bucket, the latest source session wins.
+    # Keep the source DB untouched so original exchange dates remain auditable.
     weekend_rows = contract_history.filter(
         pl.col('date').dt.weekday() >= 6
     ).height
@@ -837,9 +837,9 @@ def build_ib_contract_history(
         .with_columns(pl.col('date').alias('source_session_date'))
         .with_columns(
             pl.when(pl.col('date').dt.weekday() == 6)
-            .then(pl.col('date') + pl.duration(days=2))
+            .then(pl.col('date') - pl.duration(days=1))
             .when(pl.col('date').dt.weekday() == 7)
-            .then(pl.col('date') + pl.duration(days=1))
+            .then(pl.col('date') - pl.duration(days=2))
             .otherwise(pl.col('date'))
             .alias('date')
         )

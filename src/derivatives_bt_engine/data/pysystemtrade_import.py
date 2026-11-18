@@ -37,7 +37,7 @@ from derivatives_bt_engine.data.pysystemtrade_classification import (
 
 logger = setup_logger()
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 
 _MULTIPLE_SCHEMA = {
@@ -164,18 +164,19 @@ def _timestamp_expr(column: str) -> pl.Expr:
     return pl.col(column).str.to_datetime(strict=True, time_unit="us")
 
 
-def _following_session_date_expr(column: str = "source_timestamp") -> pl.Expr:
-    """Map Sunday observations to Monday while preserving source timestamps.
+def _business_date_expr(column: str = "source_timestamp") -> pl.Expr:
+    """Map weekend observations to Friday while preserving source timestamps.
 
-    Carver's mixed-frequency CSV timestamps are naive, but Sunday evening rows
-    belong to the following futures trading session.  The paid Globex daily
-    table already applies that convention, so persist it explicitly here rather
-    than making every downstream consumer reinterpret the raw timestamp.
+    This matches pandas ``resample('B')`` bins used by PST account curves:
+    Saturday and Sunday observations belong to the preceding Friday. The raw
+    timestamp remains available so the source session can still be audited.
     """
     timestamp = pl.col(column)
     return (
-        pl.when(timestamp.dt.weekday() == 7)
-        .then(timestamp.dt.offset_by("1d").dt.date())
+        pl.when(timestamp.dt.weekday() == 6)
+        .then(timestamp.dt.offset_by("-1d").dt.date())
+        .when(timestamp.dt.weekday() == 7)
+        .then(timestamp.dt.offset_by("-2d").dt.date())
         .otherwise(timestamp.dt.date())
         .alias("trade_date")
     )
@@ -189,7 +190,7 @@ def _read_multiple(path: Path, relative_path: str) -> pl.DataFrame:
             pl.lit(path.stem).alias("instrument_code"),
             pl.lit(relative_path).alias("source_file"),
         )
-        .with_columns(_following_session_date_expr())
+        .with_columns(_business_date_expr())
         .select(
             "instrument_code",
             "source_timestamp",
@@ -213,7 +214,7 @@ def _read_adjusted(path: Path, relative_path: str) -> pl.DataFrame:
             pl.lit(path.stem).alias("instrument_code"),
             pl.lit(relative_path).alias("source_file"),
         )
-        .with_columns(_following_session_date_expr())
+        .with_columns(_business_date_expr())
         .select(
             "instrument_code",
             "source_timestamp",
@@ -744,8 +745,10 @@ def _validate_import(
             FROM {table}
             WHERE trade_date IS NULL
                OR trade_date != CASE
+                    WHEN EXTRACT(ISODOW FROM source_timestamp) = 6
+                    THEN CAST(source_timestamp AS DATE) - 1
                     WHEN EXTRACT(ISODOW FROM source_timestamp) = 7
-                    THEN CAST(source_timestamp AS DATE) + 1
+                    THEN CAST(source_timestamp AS DATE) - 2
                     ELSE CAST(source_timestamp AS DATE)
                   END
             """
@@ -809,11 +812,12 @@ def _validate_import(
 
 
 def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
-    """Materialize one last-complete observation per Monday-Friday session.
+    """Materialize one last-complete observation per business-date bucket.
 
     The shipped files mix historical 23:00 daily observations with irregular
-    intraday snapshots. Weekend observations are assigned to the following
-    Monday, and the latest complete timestamp for an instrument/session wins.
+    intraday snapshots. Weekend observations share the preceding Friday
+    business date, and the latest complete timestamp for an instrument/date
+    bucket wins.
     Raw rows and their original ``source_timestamp`` remain intact. Selection
     is performed independently for adjusted prices, marks, roll inputs, and
     carry because their validity requirements differ. Full-frequency raw roll
@@ -827,8 +831,8 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
             SELECT
                 instrument_code,
                 CASE EXTRACT(ISODOW FROM source_timestamp)
-                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
-                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) - 1
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) - 2
                     ELSE CAST(source_timestamp AS DATE)
                 END AS trade_date,
                 source_timestamp,
@@ -862,8 +866,8 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
             SELECT
                 instrument_code,
                 CASE EXTRACT(ISODOW FROM source_timestamp)
-                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
-                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) - 1
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) - 2
                     ELSE CAST(source_timestamp AS DATE)
                 END AS trade_date,
                 source_timestamp,
@@ -900,8 +904,8 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
             SELECT
                 instrument_code,
                 CASE EXTRACT(ISODOW FROM source_timestamp)
-                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
-                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) - 1
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) - 2
                     ELSE CAST(source_timestamp AS DATE)
                 END AS trade_date,
                 source_timestamp,
@@ -942,8 +946,8 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
             SELECT
                 instrument_code,
                 CASE EXTRACT(ISODOW FROM source_timestamp)
-                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
-                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) - 1
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) - 2
                     ELSE CAST(source_timestamp AS DATE)
                 END AS trade_date,
                 source_timestamp,

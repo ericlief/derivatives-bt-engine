@@ -48,7 +48,7 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 14
+HISTORY_SCHEMA_VERSION = 15
 # Increment when calendar selection semantics change. This is intentionally
 # narrower than the public history schema version: it invalidates derived
 # calendar-selected caches without claiming that report columns changed.
@@ -498,14 +498,14 @@ class PysystemtradeHistoryProvider:
             [instrument_code],
         ).pl()
         # Retain every raw observation for roll-neutral reconstruction, but
-        # align its daily grouping key with the Monday-Friday mark/carry
+        # align its daily grouping key with the Friday-bucketed mark/carry
         # projections. The last source timestamp in each bucket owns the day.
         raw_roll_inputs = con.execute(
             """
             SELECT
                 CASE EXTRACT(ISODOW FROM trade_date)
-                    WHEN 6 THEN CAST(trade_date AS DATE) + 2
-                    WHEN 7 THEN CAST(trade_date AS DATE) + 1
+                    WHEN 6 THEN CAST(trade_date AS DATE) - 1
+                    WHEN 7 THEN CAST(trade_date AS DATE) - 2
                     ELSE CAST(trade_date AS DATE)
                 END AS date,
                 source_timestamp,

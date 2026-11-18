@@ -63,11 +63,10 @@ for any weekend-dated P&L rows it assigns amounts to Friday, emits every
 weekday between the first and last observations, treats an absent instrument
 row as zero P&L, and preserves invalidity for an observed active row whose
 P&L inputs are incomplete. The PST and IB history builders canonicalize
-weekend observations to Monday before producing daily prices and point
-changes, so regenerated P&L from those histories is dated Monday. Static and
-walk-forward books both provide membership across empty weekdays. The saved
-run has not been regenerated, so its reported calendar statistics are still
-pre-fix.
+weekend observations to Friday before producing daily prices, carry, and point
+changes, matching PST's account-curve buckets. Static and walk-forward books
+both provide membership across empty weekdays. The saved run has not been
+regenerated, so its reported calendar statistics are still pre-fix.
 
 ## Saved parameters
 
@@ -397,12 +396,15 @@ The saved carry forecast panel contains 1,202 Saturday observations across 17
 symbols. Four members of the final 2026 book have Saturday observations in
 that panel: `XINA50` (87), `SCI` (83), `MJ` (64), and `TSEREIT` (58). These
 counts describe the saved run before the weekday migration. The PST sidecar was
-rebuilt from the same pinned source at schema version 6: all derived
+rebuilt from the same pinned source at schema version 7: raw rows keep their
+source timestamps while their `trade_date` keys and all derived
 `daily.adjusted_prices`, `daily.marks`, `daily.roll_inputs`, and `daily.carry`
-dates are now Monday through Friday. Raw source rows retain their original
-timestamps, including Saturdays. Carry forecasts and selection caches built
-before this migration remain unchanged; rerunning selection will rebuild them
-under the bumped history schema.
+dates use Friday buckets for Saturday and Sunday observations. Thus raw roll
+inputs, daily marks, and each available carry observation share a Friday date
+key; Panama is generated from the same aligned raw inputs. Dates without a
+valid carry observation remain absent. Carry forecasts and selection caches
+built before this migration remain unchanged; rerunning selection will rebuild
+them under the bumped history schema.
 
 The IB tail is a separate date range and has a different count. In the
 available dated-contract DB, 11 instrument histories contain Saturday bars
@@ -410,9 +412,9 @@ after the 2024-03-29 PST handoff, through June 20, 2026. The saved cash output
 uses Saturday rows for five symbols: `SCI` (112), `XINA50` (101), `TWN` (88),
 `XIN0I` (78), and `SPI` (73). Only `SCI` and `XINA50` are in the final 2026
 book. These are counts in the saved pre-normalization run. The shared IB
-history builder now maps Saturday and Sunday sessions to the following Monday,
-then keeps the latest observation for each contract and canonical business
-date. The raw IB daily-bar database is preserved. Update and snapshot modes
+history builder now maps Saturday and Sunday bars to the preceding Friday,
+then keeps the latest observation for each contract and business date. The raw
+IB daily-bar database is preserved. Update and snapshot modes
 both use this builder, and the bumped history/calendar cache versions cause
 derived histories to be rebuilt. No saved IB cash or forecast artifacts have
 been regenerated as part of this migration. Thus the earlier 17-symbol count

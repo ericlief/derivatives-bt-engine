@@ -770,8 +770,8 @@ def render_markdown(
         "references are flagged rather than coerced. Valid returns are compounded "
         "into positive signal indices before trend forecasts are computed.",
         "",
-        "Carver source timestamps are preserved, while Sunday observations are assigned "
-        "to the following Monday trading session during sidecar import.",
+        "Carver source timestamps are preserved, while weekend observations are assigned "
+        "to the preceding Friday business date during sidecar import.",
         "Daily volatility is the annualized trailing 20-session standard deviation of "
         "normalized returns. The tables report every tested -1/0/+1 calendar-day "
         "correlation for both returns and volatility.",
