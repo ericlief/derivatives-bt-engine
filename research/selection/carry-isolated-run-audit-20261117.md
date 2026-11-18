@@ -402,6 +402,16 @@ the updated source database and cache are used before changing forecast
 smoothing. This forecast-frequency issue is separate from the implemented
 portfolio P&L resampling.
 
+The IB tail is a separate date range and has a different count. In the
+available dated-contract DB, 11 instrument histories contain Saturday bars
+after the 2024-03-29 PST handoff, through June 20, 2026. The saved cash output
+uses Saturday rows for five symbols: `SCI` (112), `XINA50` (101), `TWN` (88),
+`XIN0I` (78), and `SPI` (73). Only `SCI` and `XINA50` are in the final 2026
+book. There are no Saturday rows in the saved IB cash tail after June 20;
+the November 2026 endpoint is weekday-only. Thus the earlier 17-symbol count
+describes pre-tail PST carry observations, not the number of instruments with
+Saturday sessions in the new IB tail.
+
 The saved 2026 tail is complete through November 11 for cash P&L: all 16 book
 members have valid market P&L on that date. It is fully signal-populated only
 through November 10; six members have a null carry forecast on November 11,
