@@ -393,6 +393,65 @@ def _selection_history_content_identity(
     }
 
 
+def _stitched_carry_source_identity(
+    history: FuturesHistory,
+    *,
+    history_code: str,
+) -> dict[str, object]:
+    """Describe the validated direct PST-to-IB history used by carry."""
+    live_tail_start = _direct_ib_handoff_date(
+        history,
+        history_code=history_code,
+    )
+    if live_tail_start is None:
+        raise ValueError(
+            f"{history_code}: stored stitched history has no IB segment"
+        )
+    available_sources = [
+        str(value)
+        for value in (history.metadata.get("available_sources") or [])
+    ]
+    source_priority = [
+        str(value)
+        for value in (history.metadata.get("source_priority") or [])
+    ]
+    return {
+        "content": _selection_history_content_identity(history),
+        "instrument_code": history.instrument_code,
+        "available_sources": available_sources,
+        "source_priority": source_priority,
+        "signal_rows": history.signal.height,
+        "signal_start": str(history.signal.get_column("date").min()),
+        "signal_end": str(history.signal.get_column("date").max()),
+        "live_tail_start": live_tail_start,
+    }
+
+
+def _load_offline_stitched_history(
+    args: argparse.Namespace,
+    *,
+    signal_symbol: str,
+    snapshot_end: date | None,
+) -> FuturesHistory:
+    """Stitch the saved reference and IB bars without requesting new IB data."""
+    return IBStitchedHistoryProvider(
+        ib=None,
+        as_of=snapshot_end,
+        prior_years=args.ib_prior_years,
+        reference_db_path=args.history_db.expanduser().resolve(),
+        globex_db_path=args.globex_db.expanduser().resolve(),
+        include_globex=False,
+        preserve_reference_overlap=True,
+        mapping_path=args.broker_mapping.expanduser().resolve(),
+        history_db_path=args.ib_history_db.expanduser().resolve(),
+        cache_root=args.cache.expanduser().resolve(),
+        use_cache=True,
+        save_cache=True,
+        update_history=False,
+        max_source_gap_days=args.max_source_gap_days,
+    ).load(signal_symbol)
+
+
 def _selection_cache_json_value(value: object) -> object:
     """Normalize cache identity values to stable JSON-compatible primitives."""
     if isinstance(value, dict):
@@ -3937,6 +3996,11 @@ def _run_complete_selection(
                 str(instrument["pst_instr_code"]),
                 str(instrument["signal_symbol"]),
             )
+    ib_carry_history_store = (
+        IBFuturesHistoryStore(args.ib_history_db.expanduser().resolve())
+        if args.ib_history_db is not None and args.signal_model == CARRY_MODEL
+        else None
+    )
     return_tsmom_calibration_universe = sorted({
         str(row["hist_instr_code"])
         for row in source_rows.values()
@@ -4053,6 +4117,7 @@ def _run_complete_selection(
 
         currency = str(row["ccy"]).upper()
         stitched_carry_cache_spec = None
+        stitched_carry_history = None
         stitched_forecast_identity = None
         stitched_history_db_identity = history_db_identity
         snapshot_end = None
@@ -4060,18 +4125,89 @@ def _run_complete_selection(
             signal_symbol = stitched_signal_by_history_code.get(history_code)
             if signal_symbol is None:
                 raise ValueError(
-                    f"{history_code}: no IB signal mapping for stitched carry cache"
+                    f"{history_code}: no IB signal mapping for carry history"
                 )
             snapshot_end = snapshot_data_end_by_signal.get(signal_symbol)
-            stitched_carry_cache_spec = _cached_stitched_carry_forecast_spec(
-                backtest_cache_root,
-                history_code=history_code,
-                smooth_spans=carry_smooths,
-                min_valid_observations=args.min_forecast_obs,
-                snapshot_end=snapshot_end,
-            )
-            stitched_forecast_identity = stitched_carry_cache_spec[2]["source"]
-            stitched_history_db_identity = stitched_carry_cache_spec[2]["history_db"]
+            try:
+                stitched_carry_cache_spec = (
+                    _cached_stitched_carry_forecast_spec(
+                        backtest_cache_root,
+                        history_code=history_code,
+                        smooth_spans=carry_smooths,
+                        min_valid_observations=args.min_forecast_obs,
+                        snapshot_end=snapshot_end,
+                    )
+                )
+            except FileNotFoundError as cache_miss:
+                raw_identity = (
+                    ib_carry_history_store.instrument_fingerprint(
+                        instrument_code=history_code,
+                    )
+                    if ib_carry_history_store is not None
+                    else {}
+                )
+                if int(raw_identity.get("con_n") or 0) > 0 and int(
+                    raw_identity.get("fetch_n") or 0
+                ) > 0:
+                    try:
+                        stitched_carry_history = (
+                            _load_offline_stitched_history(
+                                args,
+                                signal_symbol=signal_symbol,
+                                snapshot_end=snapshot_end,
+                            )
+                        )
+                        stitched_source = _stitched_carry_source_identity(
+                            stitched_carry_history,
+                            history_code=history_code,
+                        )
+                        stitched_carry_cache_spec = (
+                            _carry_forecast_cache_spec(
+                                backtest_cache_root,
+                                artifact="carry_stitched_forecast",
+                                history_code=history_code,
+                                history_db_identity=history_db_identity,
+                                smooth_spans=carry_smooths,
+                                min_valid_observations=args.min_forecast_obs,
+                                source_identity=stitched_source,
+                            )
+                        )
+                        logger.info(
+                            "carry_stitched_forecast cache_miss_building "
+                            "hist_instr_code=%s signal_symbol=%s "
+                            "signal_end=%s source=stored_ib_history",
+                            history_code,
+                            signal_symbol,
+                            stitched_source["signal_end"],
+                        )
+                    except Exception as exc:
+                        stitched_carry_history = None
+                        stitched_carry_cache_spec = None
+                        logger.warning(
+                            "carry_stitched_forecast unavailable "
+                            "hist_instr_code=%s fallback=reference "
+                            "reason=%s cache_miss=%s",
+                            history_code,
+                            exc,
+                            cache_miss,
+                        )
+                else:
+                    logger.info(
+                        "carry_stitched_forecast unavailable "
+                        "hist_instr_code=%s signal_symbol=%s "
+                        "fallback=reference reason=no_stored_ib_contracts "
+                        "cache_miss=%s",
+                        history_code,
+                        signal_symbol,
+                        cache_miss,
+                    )
+            if stitched_carry_cache_spec is not None:
+                stitched_forecast_identity = (
+                    stitched_carry_cache_spec[2]["source"]
+                )
+                stitched_history_db_identity = (
+                    stitched_carry_cache_spec[2]["history_db"]
+                )
         reference_base_identity = {
             "symbol": symbol,
             "hist_instr_code": str(row["hist_instr_code"]),
@@ -4353,7 +4489,10 @@ def _run_complete_selection(
                         # A current stitched cache is required when IB history
                         # is enabled; its saved curve is sufficient to replay
                         # this forecast without reopening raw source databases.
-                        history=frames_by_history.get(history_code),
+                        history=(
+                            stitched_carry_history
+                            or frames_by_history.get(history_code)
+                        ),
                         min_valid_observations=args.min_forecast_obs,
                         smooth_spans=carry_smooths,
                     )
@@ -5520,7 +5659,6 @@ def _run_complete_selection(
                                     smooth_spans=carry_smooths,
                                     min_valid_observations=args.min_forecast_obs,
                                     snapshot_end=snapshot_end,
-                                    source_identity=stitched_source_identity,
                                 )
                                 stitched_result = _load_or_build_carry_forecast(
                                     carry_cache_spec,
