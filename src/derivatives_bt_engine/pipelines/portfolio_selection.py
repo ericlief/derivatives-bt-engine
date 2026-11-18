@@ -5730,6 +5730,14 @@ def _run_complete_selection(
                 book_symbols_by_date[curve_date] = book_by_review_date[
                     ordered_review_dates[review_index]
                 ]
+    else:
+        static_book = tuple(sorted(selection.selected))
+        book_symbols_by_date = {
+            curve_date: static_book
+            for curve_date in sorted(
+                set(cash_pnl_long.get_column("date").drop_nulls().to_list())
+            )
+        }
     portfolio_curve = build_portfolio_equity_curve(
         cash_pnl_long,
         initial_capital_usd=float(run_config["init_cap_usd"]),

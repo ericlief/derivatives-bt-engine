@@ -45,14 +45,26 @@ the evidence for the pre-fix behavior.
    pinned pysystemtrade commit `b4a25e6e` shows that PST does not drop the
    entire portfolio day: it forward-fills an absent instrument price on its
    business-day grid, gives that instrument zero P&L, keeps other markets'
-   P&L, and resamples account curves to `1B`. This carry baseline is not
-   decision-ready for Sharpe or Calmar comparison until its portfolio calendar
-   follows an equivalent explicit policy.
+   P&L, and resamples account curves to `1B`. The saved run predates the
+   equivalent calendar handling now implemented in the portfolio curve, so
+   its Sharpe and Calmar still require a rerun before comparison.
 
 The probation-entry behavior and return-validity issue are separate. Fixing
 the first changes selection. Fixing the second changes portfolio accounting
 or validity classification and may change reported performance even with the
 same books.
+
+### Portfolio P&L calendar implementation status
+
+The saved Parquet results above predate the calendar fix and retain their
+original returns and validity flags. The current implementation in
+`calculations/pnl.py` now follows the inspected PST account-curve convention:
+it assigns weekend P&L to Friday, emits every weekday between the first and
+last observations, treats an absent instrument row as zero P&L, and preserves
+invalidity for an observed active row whose P&L inputs are incomplete. Static
+and walk-forward books both provide membership across empty weekdays. The
+saved run has not been regenerated, so its reported calendar statistics are
+still pre-fix.
 
 ## Saved parameters
 
@@ -353,11 +365,10 @@ The relevant PST implementation is explicit:
 
 Therefore excluding every partial-book day is not a valid PST-parity repair.
 It discards genuine returns from open markets and, in this run, removes a net
-loss. The historical repair should normalize source dates to the intended
-session/business date, add explicit zero contributions for verified closed
-markets, and retain a separate invalid marker for genuine data gaps. An
-unfinished final tail is different and should be excluded after the last
-complete endpoint.
+loss. The code now normalizes weekend dates to PST's business-day bins and
+lets absent instrument rows contribute zero while retaining invalidity for an
+observed active row with incomplete P&L inputs. An unfinished final tail is
+different and should still be excluded after the last complete endpoint.
 
 Strict-valid returns total 716.52%, while the complete economic cash series
 totals 702.95%. Therefore:
@@ -366,9 +377,9 @@ totals 702.95%. Therefore:
   reconcile to equity;
 - Sharpe and Calmar below use only `ret_valid=true` dates and are diagnostic;
 - dropping invalid dates is not a valid repair because it removes a net loss;
-- a repair must create explicit zero rows only for verified market closures,
-  normalize weekend/session labels before annualizing risk, and preserve
-  invalid status for genuine missing data.
+- these table values describe the pre-fix saved run; a new run will use the
+  current PST-style business-day aggregation and zero contribution for absent
+  instrument rows, while explicit invalid P&L rows remain flagged.
 
 ### Forecast gaps and the 2026 endpoint
 
@@ -379,13 +390,17 @@ or gap longer than seven calendar days, and persists a forecast for no more
 than seven days while the executable contract is unchanged. Missing market
 rows therefore do not leak future values or invent cross-gap P&L.
 
-However, this implementation applies the 5/20/60/120 EWMAs over observed
-rows. PST first places daily inputs on a business-day index. The extra SGX
-Saturday rows consequently count as extra smoothing observations in the
-stitched tail and should be session-normalized for exact span semantics.
-Ordinary exchange holidays and short absences are otherwise safe for forecast
-causality; their effect is a small timing difference rather than missing cash
-P&L.
+The saved carry forecast panel contains 1,202 Saturday observations across 17
+symbols. Four members of the final 2026 book have Saturday observations in
+that panel: `XINA50` (87), `SCI` (83), `MJ` (64), and `TSEREIT` (58). The
+currently available PST `daily.carry` table also contains Saturday rows for
+these instruments. `build_carry_components` applies EWMA spans directly to
+observed carry rows, so those Saturdays count as extra smoothing observations
+in this saved run. The M–F aggregation described by the user is not reflected
+in the PST carry table or saved forecast artifact inspected here; verify that
+the updated source database and cache are used before changing forecast
+smoothing. This forecast-frequency issue is separate from the implemented
+portfolio P&L resampling.
 
 The saved 2026 tail is complete through November 11 for cash P&L: all 16 book
 members have valid market P&L on that date. It is fully signal-populated only
@@ -421,7 +436,8 @@ weight 49.99%, and maximum book margin $34,235.71. It is:
 equity curve. `Strict-valid return`, Sharpe, and Calmar exclude dates marked
 invalid. Calmar is the annualized strict-valid arithmetic mean divided by the
 within-year drawdown on the complete saved equity curve. The starred columns
-are diagnostics until the portfolio calendar/validity treatment is fixed.
+are diagnostics from the saved pre-fix run and do not reflect the calendar
+behavior now implemented in source.
 
 | Year | Net return | Strict-valid return | Invalid dates / return | Gross P&L | Costs | Sharpe* | Max DD | Calmar* |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -490,10 +506,11 @@ restricts probation to incumbents. The micro-ag sizing is correct, although
 route churn remains an open policy choice because no route hysteresis or
 switching penalty is active.
 
-The proposed baseline should be rerun after probation admission and the
-return-calendar issue are both resolved. Until then, the economically
-reconciled P&L is useful for debugging, but the 0.748 Sharpe and 0.504 Calmar
-should not be used to decide whether carry improves the fixed $75,000 book.
+The proposed baseline should be rerun to capture both the probation admission
+fix and the PST-style return calendar implementation. Until that regenerated
+run exists, the economically reconciled P&L is useful for debugging, but the
+saved 0.748 Sharpe and 0.504 Calmar should not be used to decide whether carry
+improves the fixed $75,000 book.
 
 Primary evidence is in the run's `carry_selection_review_instruments`,
 `review_trials`, `review_trial_allocations`, `review_final_allocations`,

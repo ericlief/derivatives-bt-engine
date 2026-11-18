@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from datetime import date, timedelta
 
 import polars as pl
 
@@ -66,6 +67,26 @@ def _with_source_gap_audit(frame: pl.DataFrame) -> pl.DataFrame:
     else:
         expressions.append(pl.lit(False).alias("gap_pnl_omitted"))
     return frame.with_columns(*expressions)
+
+
+def _pysystemtrade_business_date(value: date) -> date:
+    """Map weekend P&L dates to Friday, matching PST ``resample('1B')`` bins."""
+    if value.weekday() == 5:
+        return value - timedelta(days=1)
+    if value.weekday() == 6:
+        return value - timedelta(days=2)
+    return value
+
+
+def _business_dates_between(start: date, end: date) -> list[date]:
+    """Return weekdays in an inclusive range, including exchange holidays."""
+    dates: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            dates.append(current)
+        current += timedelta(days=1)
+    return dates
 
 
 _REFERENCE_ACCOUNTING_COLUMNS = (
@@ -1787,7 +1808,7 @@ def build_portfolio_equity_curve(
     initial_capital_usd: float,
     capital_mode: str = "compounded",
     target_volatility: float | None = None,
-    book_symbols_by_date: dict[object, tuple[str, ...]] | None = None,
+    book_symbols_by_date: dict[date, tuple[str, ...]] | None = None,
 ) -> pl.DataFrame:
     """Aggregate selected-book cash P&L into gross and net equity curves.
 
@@ -1815,22 +1836,25 @@ def build_portfolio_equity_curve(
     Returns
     -------
     polars.DataFrame
-        One row per date with summed daily USD cash flows, daily returns based
-        on the configured capital policy, cumulative returns relative to initial
-        capital, cost contributions, equity paths, and coverage counts. A return
-        is invalid when a selected book member lacks valid daily P&L. When
-        ``target_volatility`` is supplied, each date also carries that constant
-        annualized sizing target.
+        One row per weekday with summed USD cash flows, daily returns based on
+        the configured capital policy, cumulative returns relative to initial
+        capital, cost contributions, equity paths, and coverage counts. A
+        return is invalid when an observed, economically active instrument row
+        has invalid P&L. Missing instrument rows contribute zero, matching
+        pysystemtrade's forward-filled prices followed by business-day
+        resampling. When ``target_volatility`` is supplied, each date also
+        carries that constant annualized sizing target.
 
     Notes
     -----
     Position-sizing semantics belong to the supplied cash frame. Daily returns
     use the same capital mode so fixed-capital cash P&L remains an additive
     return series and compounded cash P&L remains a lagged-equity return series.
-    Null or non-finite cash values contribute zero to the daily sum;
-    ``portfolio_valid_pnl_instruments`` records how many instrument rows
-    supplied a valid P&L observation. An economically active row is selected,
-    holds a position, trades, or rolls on that date.
+    Null or non-finite cash values contribute zero to the daily sum. Weekend
+    P&L is assigned to Friday, as in PST's ``resample('1B').sum()``, and the
+    output contains every weekday between the first and last observation.
+    Empty weekdays contribute zero; explicit invalid rows remain invalid. An
+    economically active row is selected, holds a position, trades, or rolls.
     """
     if not math.isfinite(initial_capital_usd) or initial_capital_usd <= 0:
         raise ValueError("initial_capital_usd must be finite and positive")
@@ -1864,9 +1888,58 @@ def build_portfolio_equity_curve(
             .otherwise(0.0)
         )
 
-    active_column = (
-        "sel_active" if "sel_active" in cash_pnl_long.columns else None
+    # PST fills absent prices forward, which makes an unobserved session's
+    # price change zero. Its account curve then resamples with ``1B``: weekend
+    # observations land in Friday's bin and empty weekdays sum to zero.
+    business_cash_pnl = cash_pnl_long.with_columns(
+        pl.when(pl.col("date").dt.weekday() == 6)
+        .then(pl.col("date") - pl.duration(days=1))
+        .when(pl.col("date").dt.weekday() == 7)
+        .then(pl.col("date") - pl.duration(days=2))
+        .otherwise(pl.col("date"))
+        .alias("date")
     )
+
+    active_column = (
+        "sel_active" if "sel_active" in business_cash_pnl.columns else None
+    )
+    if book_symbols_by_date is None:
+        if active_column is not None:
+            active_membership = (
+                business_cash_pnl.group_by("date")
+                .agg(
+                    pl.col("symbol")
+                    .filter(pl.col("sel_active").fill_null(False))
+                    .unique()
+                    .sort()
+                    .alias("symbols")
+                )
+                .sort("date")
+            )
+            book_symbols_by_date = {
+                row["date"]: tuple(row["symbols"] or [])
+                for row in active_membership.iter_rows(named=True)
+            }
+        else:
+            static_symbols = tuple(
+                sorted(
+                    business_cash_pnl.get_column("symbol")
+                    .drop_nulls()
+                    .unique()
+                    .to_list()
+                )
+            )
+            observed_dates = (
+                business_cash_pnl.get_column("date")
+                .drop_nulls()
+                .unique()
+                .sort()
+                .to_list()
+            )
+            book_symbols_by_date = {
+                observed_date: static_symbols
+                for observed_date in observed_dates
+            }
     instrument_count = (
         pl.col("symbol")
         .filter(pl.col(active_column).fill_null(False))
@@ -1886,12 +1959,12 @@ def build_portfolio_equity_curve(
         else pl.lit(True)
     )
     for position_column in ("held_con", "trade_con", "roll_con"):
-        if position_column in cash_pnl_long.columns:
+        if position_column in business_cash_pnl.columns:
             economically_active |= (
                 pl.col(position_column).fill_null(0) != 0
             )
     daily = (
-        cash_pnl_long.group_by("date")
+        business_cash_pnl.group_by("date")
         .agg(
             instrument_count
             .cast(pl.Int64)
@@ -1902,15 +1975,19 @@ def build_portfolio_equity_curve(
             .sort()
             .str.join(",")
             .alias("portfolio_instruments"),
-            pl.col("pnl_valid")
-            .fill_null(False)
-            .cast(pl.Int64)
-            .sum()
+            pl.col("symbol")
+            .filter(
+                pl.col("pnl_valid").fill_null(False)
+                & economically_active
+            )
+            .n_unique()
             .alias("portfolio_valid_pnl_instruments"),
-            (~pl.col("pnl_valid").fill_null(False))
-            .filter(economically_active)
-            .cast(pl.Int64)
-            .sum()
+            pl.col("symbol")
+            .filter(
+                ~pl.col("pnl_valid").fill_null(False)
+                & economically_active
+            )
+            .n_unique()
             .alias("portfolio_invalid_pnl_instruments"),
             *[
                 finite_or_zero(source)
@@ -1921,15 +1998,39 @@ def build_portfolio_equity_curve(
         )
         .sort("date")
     )
-    if book_symbols_by_date is not None:
-        membership_rows = [
-            {
-                "date": date_value,
-                "portfolio_instruments_from_book": ",".join(symbols),
-                "portfolio_instrument_count_from_book": len(symbols),
-            }
-            for date_value, symbols in book_symbols_by_date.items()
-        ]
+    first_date = daily.get_column("date").min()
+    last_date = daily.get_column("date").max()
+    if first_date is None or last_date is None:
+        raise ValueError("portfolio curve input contains no dated cash rows")
+    business_calendar = pl.DataFrame(
+        {"date": _business_dates_between(first_date, last_date)},
+        schema_overrides={"date": daily.schema["date"]},
+    )
+    daily = business_calendar.join(daily, on="date", how="left").sort("date")
+    if book_symbols_by_date:
+        # Membership is given on observed cash dates. Normalize those dates
+        # like the cash rows, then carry the last known book across empty
+        # business-day bins so closure dates remain valid zero-P&L sessions.
+        membership_by_business_date: dict[date, tuple[str, ...]] = {}
+        for date_value, symbols in sorted(book_symbols_by_date.items()):
+            membership_by_business_date[
+                _pysystemtrade_business_date(date_value)
+            ] = symbols
+        membership_rows: list[dict[str, object]] = []
+        current_symbols: tuple[str, ...] | None = None
+        for business_date in _business_dates_between(first_date, last_date):
+            if business_date in membership_by_business_date:
+                current_symbols = membership_by_business_date[business_date]
+            if current_symbols is not None:
+                membership_rows.append({
+                    "date": business_date,
+                    "portfolio_instruments_from_book": ",".join(
+                        current_symbols
+                    ),
+                    "portfolio_instrument_count_from_book": len(
+                        current_symbols
+                    ),
+                })
         if membership_rows:
             membership = pl.DataFrame(
                 membership_rows,
@@ -1939,9 +2040,9 @@ def build_portfolio_equity_curve(
                     "portfolio_instrument_count_from_book": pl.Int64,
                 },
             )
-            if "sel_active" in cash_pnl_long.columns:
+            if "sel_active" in business_cash_pnl.columns:
                 observed_book_rows = (
-                    cash_pnl_long
+                    business_cash_pnl
                     .filter(pl.col("sel_active").fill_null(False))
                     .group_by("date")
                     .agg(
@@ -1963,47 +2064,43 @@ def build_portfolio_equity_curve(
                         "portfolio_observed_book_instruments"
                     )
                 )
-            daily = (
-                daily.join(membership, on="date", how="left")
-                .with_columns(
-                    pl.coalesce(
-                        "portfolio_instruments_from_book",
-                        "portfolio_instruments",
-                    ).alias("portfolio_instruments"),
-                    pl.coalesce(
-                        "portfolio_instrument_count_from_book",
-                        "portfolio_instrument_count",
-                    ).alias("portfolio_instrument_count"),
-                    pl.when(
-                        pl.col(
-                            "portfolio_instrument_count_from_book"
-                        ).is_not_null()
-                    )
-                    .then(
-                        pl.col(
-                            "portfolio_instrument_count_from_book"
-                        )
-                        - pl.col(
-                            "portfolio_observed_book_instruments"
-                        ).fill_null(0)
-                    )
-                    .otherwise(0)
-                    .clip(lower_bound=0)
-                    .alias("missing_book_instruments"),
-                )
-                .with_columns(
-                    (
-                        pl.col("portfolio_invalid_pnl_instruments")
-                        + pl.col("missing_book_instruments")
-                    ).alias("portfolio_invalid_pnl_instruments"),
-                )
-                .drop(
+            daily = daily.join(membership, on="date", how="left")
+            if "sel_active" in business_cash_pnl.columns:
+                daily = daily.drop("portfolio_observed_book_instruments")
+            daily = daily.with_columns(
+                pl.coalesce(
                     "portfolio_instruments_from_book",
+                    "portfolio_instruments",
+                ).alias("portfolio_instruments"),
+                pl.coalesce(
                     "portfolio_instrument_count_from_book",
-                    "portfolio_observed_book_instruments",
-                    "missing_book_instruments",
+                    "portfolio_instrument_count",
+                ).alias("portfolio_instrument_count"),
+                # An absent instrument row is the zero-P&L case in PST. Only
+                # an observed row explicitly marked invalid counts as invalid.
+                pl.col("portfolio_invalid_pnl_instruments")
+                .fill_null(0)
+                .alias("portfolio_invalid_pnl_instruments"),
+            ).with_columns(
+                (
+                    pl.col("portfolio_instrument_count")
+                    - pl.col("portfolio_invalid_pnl_instruments")
                 )
+                .clip(lower_bound=0)
+                .alias("portfolio_valid_pnl_instruments"),
+            ).drop(
+                "portfolio_instruments_from_book",
+                "portfolio_instrument_count_from_book",
             )
+    daily = daily.with_columns(
+        pl.col("portfolio_instrument_count").fill_null(0),
+        pl.col("portfolio_valid_pnl_instruments").fill_null(0),
+        pl.col("portfolio_invalid_pnl_instruments").fill_null(0),
+        *[
+            pl.col(column).fill_null(0.0)
+            for _, column in cash_columns
+        ],
+    )
     daily = (
         daily
         .with_columns(
