@@ -248,6 +248,8 @@ def build_ewmac_component_frame(
                 "point_change",
                 pooled.rule.column,
             ]
+            if "source_segment" in frame.columns:
+                base_columns.insert(2, "source_segment")
             if detailed:
                 base_columns = [
                     pl.col("ts_event").alias("date"),
@@ -262,6 +264,8 @@ def build_ewmac_component_frame(
                     pl.col("forecast_scalar").alias(f"scalar_{suffix}"),
                     pooled.rule.column,
                 ]
+                if "source_segment" in frame.columns:
+                    base_columns.insert(2, "source_segment")
             combined = frame.select(base_columns)
             continue
 
@@ -339,6 +343,7 @@ def build_ewmac_component_frame(
     if detailed:
         prefix.extend([
             "close",
+            *(["source_segment"] if "source_segment" in combined.columns else []),
             "contract_close",
             "fast_point_vol",
             "slow_point_vol",
@@ -351,6 +356,7 @@ def build_ewmac_component_frame(
     else:
         prefix.extend([
             "close",
+            *(["source_segment"] if "source_segment" in combined.columns else []),
             "contract_close",
             "point_vol",
             "point_change",

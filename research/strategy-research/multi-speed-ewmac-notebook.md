@@ -361,8 +361,9 @@ constant override is supplied. A market snapshot alone is insufficient for
 the costed path because it does not include the screen's annualized trading
 and roll cost inputs; use the selection-screen output.
 
-The linked hvPlot dashboard contains adjusted signal price, combined forecast,
-sized and smoothed reference positions, normalized reference position,
+For stitched histories, the combined-forecast panel marks the first IB-owned
+date with a red dashed line. The linked hvPlot dashboard contains adjusted
+signal price, combined forecast, sized and smoothed reference positions, normalized reference position,
 cumulative subsystem-reference percentage, buffered whole contracts, and
 cumulative executable cash P&L. The underlying Polars frames and annualized
 reference turnover remain available for detailed inspection:

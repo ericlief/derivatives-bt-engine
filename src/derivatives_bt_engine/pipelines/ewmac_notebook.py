@@ -2775,6 +2775,19 @@ class EwmacNotebookView:
         reference = _date_slice(self.reference, start=start, end=end)
         if reference.is_empty():
             raise ValueError("plot date range contains no forecast observations")
+        handoff_date = None
+        if "source_segment" in self.result.frame.columns:
+            ib_dates = self.result.frame.filter(
+                pl.col("source_segment") == "ib"
+            ).get_column("date")
+            if ib_dates.len():
+                handoff_date = ib_dates.min()
+                if not (
+                    reference.get_column("date").min()
+                    <= handoff_date
+                    <= reference.get_column("date").max()
+                ):
+                    handoff_date = None
 
         def line_panel(
             frame: pl.DataFrame,
@@ -2831,9 +2844,20 @@ class EwmacNotebookView:
         forecast_plot = line_panel(
             reference,
             ["comb_fcst"],
-            title="Combined forecast (mean abs 1, cap 2)",
+            title=(
+                "Combined forecast (red dashed: IB handoff)"
+                if handoff_date is not None
+                else "Combined forecast (mean abs 1, cap 2)"
+            ),
             ylabel="Average-position multiple",
         ) * hv.HLine(0.0).opts(color="black", line_width=1)
+        if handoff_date is not None:
+            forecast_plot *= hv.VLine(handoff_date).opts(
+                color="#d62728",
+                line_dash="dashed",
+                line_width=1,
+                tools=["hover"],
+            )
         proxy_plot = line_panel(
             reference,
             ["vol_scalar", "ref_avg_pos", "ref_tgt_pos"],

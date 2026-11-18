@@ -160,12 +160,17 @@ class FuturesHistory:
         """
         if self.panama.is_empty():
             raise ValueError("history has no generated Panama stream")
-        return self.panama.select(
+        columns = [
             "date",
             pl.col("panama_price").alias("close"),
             "point_change",
             "quality_flag",
-        ).sort("date")
+        ]
+        # Preserve source ownership through signal calculations so notebook
+        # forecasts can identify the IB handoff on the combined forecast plot.
+        if "source_segment" in self.panama.columns:
+            columns.append("source_segment")
+        return self.panama.select(columns).sort("date")
 
 
 def futures_history_parquet_paths(

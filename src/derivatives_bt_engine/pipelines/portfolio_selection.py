@@ -804,9 +804,24 @@ def _carry_forecast_cache_spec(
 
 def _load_carry_forecast_result(
     cache_spec: tuple[Path, Path, dict[str, object], str],
+    *,
+    smooth_spans: Iterable[int] | None = None,
 ) -> CombinedForecastResult | None:
-    """Load a complete carry forecast cache entry, returning ``None`` on miss."""
+    """Load a carry cache entry and optionally recombine cached components.
+
+    A stitched cache can contain the four AFTS carry speeds while a selected
+    instrument is eligible for only a subset. Recombine those already-scaled
+    component forecasts here so selection does not need to rebuild raw carry.
+    """
     curve_path, manifest_path, identity, _ = cache_spec
+    cached_spans = tuple(int(value) for value in identity["carry_smooth_spans"])
+    requested_spans = (
+        cached_spans
+        if smooth_spans is None
+        else tuple(int(value) for value in smooth_spans)
+    )
+    if not requested_spans or not set(requested_spans).issubset(cached_spans):
+        return None
     cached = _load_selection_backtest_curve(
         curve_path,
         manifest_path,
@@ -817,6 +832,10 @@ def _load_carry_forecast_result(
             "forecast_valid",
             "point_vol",
             "point_change",
+            *(
+                f"fcst_carry_{smooth}"
+                for smooth in requested_spans
+            ),
         ),
     )
     if cached is None:
@@ -825,12 +844,107 @@ def _load_carry_forecast_result(
     audit = _cached_forecast_audit(manifest)
     if audit is None:
         return None
-    smooths = tuple(int(value) for value in identity["carry_smooth_spans"])
+    smooths = requested_spans
     weights = {f"carry{smooth}": 1.0 / len(smooths) for smooth in smooths}
+    fdm = aft_final_rule_fdm(len(smooths))
+    if smooths != cached_spans:
+        component_columns = [f"fcst_carry_{smooth}" for smooth in smooths]
+        component_valid = pl.all_horizontal(
+            [
+                pl.col(column).is_not_null() & pl.col(column).is_finite()
+                for column in component_columns
+            ]
+        )
+        execution_valid = pl.lit(True)
+        if {"mark_contract", "current_contract"} <= set(frame.columns):
+            execution_valid &= (
+                pl.col("mark_contract") == pl.col("current_contract")
+            )
+        if "carry_stale_days" in frame.columns:
+            execution_valid &= pl.col("carry_stale_days").is_not_null()
+        if "point_vol" in frame.columns:
+            execution_valid &= (
+                pl.col("point_vol").is_not_null()
+                & pl.col("point_vol").is_finite()
+                & (pl.col("point_vol") > 0)
+            )
+        if "point_change" in frame.columns:
+            execution_valid &= (
+                pl.col("point_change").is_not_null()
+                & pl.col("point_change").is_finite()
+            )
+        weighted = pl.sum_horizontal([
+            pl.col(column) / len(component_columns)
+            for column in component_columns
+        ])
+        frame = frame.with_columns(
+            (component_valid & execution_valid).alias("forecast_valid")
+        )
+        frame = frame.with_columns(
+            pl.when(pl.col("forecast_valid"))
+            .then(
+                (weighted * fdm).clip(
+                    -CARRY_FORECAST_CAP,
+                    CARRY_FORECAST_CAP,
+                )
+            )
+            .otherwise(None)
+            .alias("combined_forecast")
+        )
+        valid = frame.filter(pl.col("forecast_valid"))
+        first_valid = valid.get_column("date").min() if valid.height else None
+        after_warmup = (
+            frame.filter(pl.col("date") >= first_valid)
+            if first_valid is not None
+            else frame
+        )
+        post_warmup_coverage = (
+            valid.filter(pl.col("date") >= first_valid).height
+            / after_warmup.height
+            if after_warmup.height
+            else 0.0
+        )
+        forecast_nonfinite = frame.filter(
+            pl.col("combined_forecast").is_not_null()
+            & ~pl.col("combined_forecast").is_finite()
+        ).height
+        min_valid_observations = int(identity["min_valid_observations"])
+        forecast_excl = (
+            "insufficient_valid_forecast_obs"
+            if valid.height < min_valid_observations
+            else "insufficient_carry_coverage"
+            if post_warmup_coverage < CARRY_MIN_POST_WARMUP_COVERAGE
+            else "nonfinite_combined_forecast"
+            if forecast_nonfinite
+            else ""
+        )
+        audit.update(
+            {
+                "carry_smooth_spans": smooths,
+                "forecast_weights": weights,
+                "fdm": fdm,
+                "forecast_valid_obs": valid.height,
+                "forecast_invalid_obs": frame.height - valid.height,
+                "forecast_post_warmup_invalid_obs": after_warmup.height
+                - valid.filter(pl.col("date") >= first_valid).height
+                if first_valid is not None
+                else after_warmup.height,
+                "forecast_post_warmup_coverage": post_warmup_coverage,
+                "forecast_min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
+                "forecast_start": first_valid,
+                "forecast_end": (
+                    valid.get_column("date").max() if valid.height else None
+                ),
+                "forecast_elig": not forecast_excl,
+                "forecast_excl": forecast_excl,
+                "combined_nonfinite": forecast_nonfinite,
+                "combined_nulls": frame.get_column("combined_forecast").null_count(),
+            }
+        )
     return CombinedForecastResult(
         frame=frame,
         weights=weights,
-        fdm=float(identity["fdm"]),
+        fdm=fdm,
         audit=audit,
     )
 
@@ -842,13 +956,15 @@ def _cached_stitched_carry_forecast_spec(
     smooth_spans: Iterable[int],
     min_valid_observations: int,
     snapshot_end: date | None,
+    source_identity: dict[str, object] | None = None,
 ) -> tuple[Path, Path, dict[str, object], str]:
     """Resolve the current stitched carry artifact from its saved manifest.
 
     The forecast cache records the complete stitched-history content identity,
     so selection can reuse the already-built artifact without rebuilding the
-    raw history or depending on an IB connection. A requested market snapshot
-    must match the artifact's last source date to prevent a stale cache tail.
+    raw history or depending on an IB connection. The artifact may end on the
+    latest completed session at or before the snapshot date, since its build
+    timestamp and market-data end date can differ.
     """
     rules = tuple(int(value) for value in smooth_spans)
     directory = (
@@ -872,9 +988,14 @@ def _cached_stitched_carry_forecast_spec(
         source = identity.get("source")
         if not isinstance(source, dict):
             continue
+        if source_identity is not None and source != source_identity:
+            continue
+        available_rules = tuple(
+            int(value) for value in identity.get("carry_smooth_spans") or ()
+        )
         if (
             identity.get("signal_model") != CARRY_MODEL
-            or tuple(identity.get("carry_smooth_spans") or ()) != rules
+            or not set(rules).issubset(available_rules)
             or identity.get("min_valid_observations") != min_valid_observations
             or not {"pysystemtrade", "ib"}.issubset(
                 set(source.get("available_sources") or [])
@@ -885,7 +1006,10 @@ def _cached_stitched_carry_forecast_spec(
             signal_end = date.fromisoformat(str(source["signal_end"]))
         except (KeyError, TypeError, ValueError):
             continue
-        if snapshot_end is not None and signal_end != snapshot_end:
+        # Rule caches are timestamped when built, while the latest completed
+        # IB market session can be the prior date. Reuse the newest eligible
+        # history ending on or before the snapshot's latest data date.
+        if snapshot_end is not None and signal_end > snapshot_end:
             continue
         history_db_identity = identity.get("history_db")
         if not isinstance(history_db_identity, dict):
@@ -895,20 +1019,23 @@ def _cached_stitched_carry_forecast_spec(
             artifact="carry_stitched_forecast",
             history_code=history_code,
             history_db_identity=history_db_identity,
-            smooth_spans=rules,
+            smooth_spans=available_rules,
             min_valid_observations=min_valid_observations,
             source_identity=source,
         )
         if cache_spec[1] != manifest_path:
             continue
-        if _load_carry_forecast_result(cache_spec) is None:
+        if _load_carry_forecast_result(
+            cache_spec,
+            smooth_spans=rules,
+        ) is None:
             continue
         candidates.append((signal_end, cache_spec))
     if not candidates:
         raise FileNotFoundError(
             f"{history_code}: no complete stitched carry cache for spans "
-            f"{rules} through snapshot {snapshot_end}; rebuild the stitched "
-            "carry cache before running selection"
+            f"{rules} through snapshot {snapshot_end}; an existing stitched "
+            "cache with those component spans and a current data end is required"
         )
     return max(candidates, key=lambda item: item[0])[1]
 
@@ -918,9 +1045,13 @@ def _load_or_build_carry_forecast(
     *,
     history: FuturesHistory | pl.DataFrame | None,
     min_valid_observations: int,
+    smooth_spans: Iterable[int] | None = None,
 ) -> CombinedForecastResult:
     """Reuse or atomically build one static reference or stitched carry forecast."""
-    cached = _load_carry_forecast_result(cache_spec)
+    cached = _load_carry_forecast_result(
+        cache_spec,
+        smooth_spans=smooth_spans,
+    )
     curve_path, manifest_path, identity, cache_key = cache_spec
     if cached is not None:
         logger.info(
@@ -4203,6 +4334,7 @@ def _run_complete_selection(
                         # this forecast without reopening raw source databases.
                         history=frames_by_history.get(history_code),
                         min_valid_observations=args.min_forecast_obs,
+                        smooth_spans=carry_smooths,
                     )
                 elif args.signal_model == EWMAC_CARRY_MODEL:
                     trend_result = engine.combine(
@@ -5361,19 +5493,19 @@ def _run_complete_selection(
                                 assert stitched_goulding_result is not None
                                 stitched_result = stitched_goulding_result
                             elif args.signal_model == CARRY_MODEL:
-                                carry_cache_spec = _carry_forecast_cache_spec(
+                                carry_cache_spec = _cached_stitched_carry_forecast_spec(
                                     backtest_cache_root,
-                                    artifact="carry_stitched_forecast",
                                     history_code=history_code,
-                                    history_db_identity=history_db_identity,
                                     smooth_spans=carry_smooths,
                                     min_valid_observations=args.min_forecast_obs,
+                                    snapshot_end=snapshot_end,
                                     source_identity=stitched_source_identity,
                                 )
                                 stitched_result = _load_or_build_carry_forecast(
                                     carry_cache_spec,
                                     history=stitched_history,
                                     min_valid_observations=args.min_forecast_obs,
+                                    smooth_spans=carry_smooths,
                                 )
                             elif args.signal_model == EWMAC_CARRY_MODEL:
                                 trend_result = engine.combine(
