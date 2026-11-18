@@ -18,6 +18,7 @@ from derivatives_bt_engine.calculations.carry import (
     CARRY_MODEL,
     CARRY_SMOOTH_SPANS,
     CARRY_TURNOVER_SOURCE,
+    EWMAC_CARRY_MODEL,
 )
 from derivatives_bt_engine.calculations.instruments import INSTRUMENTS
 from derivatives_bt_engine.data.pysystemtrade_ib import (
@@ -581,7 +582,7 @@ def apply_selection_filters(
             pl.lit(None, dtype=pl.Float64).alias("ref_roll_sr"),
         )
     report = _attach_reference_rule_eligibility(report)
-    if signal_model == CARRY_MODEL:
+    if signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
         _validate_carry_turnover_cache(report)
     report = _attach_carry_rule_eligibility(report)
     rule_eligible_column = (
@@ -589,6 +590,12 @@ def apply_selection_filters(
         if signal_model == CARRY_MODEL
         else "instr_has_elig_ewmac_rule"
     )
+    rule_eligible_expr = pl.col(rule_eligible_column).fill_null(False)
+    if signal_model == EWMAC_CARRY_MODEL:
+        rule_eligible_expr = (
+            rule_eligible_expr
+            & pl.col("instr_has_elig_carry_rule").fill_null(False)
+        )
 
     filtered = report.with_columns(
         pl.lit(initial_capital).alias("init_cap_usd"),
@@ -643,7 +650,7 @@ def apply_selection_filters(
             & pl.col("size_elig").fill_null(False)
             & pl.col("liq_elig").fill_null(False)
             & pl.col("data_elig").fill_null(False)
-            & pl.col(rule_eligible_column).fill_null(False)
+            & rule_eligible_expr
             & pl.col("exec_elig").fill_null(False)
             & (pl.col("ib_avail") == "contract_qualified")
         ).alias("selection_elig"),
@@ -677,7 +684,10 @@ def apply_selection_filters(
                 reasons.append("contract_volume")
             if not row.get("risk_volume_elig"):
                 reasons.append("risk_volume")
-        if not row.get(rule_eligible_column):
+        if not row.get(rule_eligible_column) or (
+            signal_model == EWMAC_CARRY_MODEL
+            and not row.get("instr_has_elig_carry_rule")
+        ):
             reasons.append("no_eligible_rule")
         if not row.get("exec_elig"):
             reasons.append("execution")
@@ -974,7 +984,7 @@ def selection_rebalance_candidates(
     configured reference spread and commission fields used for historical
     fixed-cost calibration when they are present.
     """
-    if signal_model == CARRY_MODEL:
+    if signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
         _validate_carry_turnover_cache(report)
     if "ref_instr_has_elig_ewmac_rule" not in report.columns:
         report = _attach_reference_rule_eligibility(report)
@@ -1022,6 +1032,8 @@ def selection_rebalance_candidates(
         & pl.col("hist_data_elig").fill_null(False)
         & pl.col(rule_flag).fill_null(False)
     )
+    if signal_model == EWMAC_CARRY_MODEL:
+        gate = gate & pl.col("ref_instr_has_elig_carry_rule").fill_null(False)
     selected = report.filter(gate).with_columns(
         # Complete historical selection consumes the ordinary cost columns.
         # Replace them at this boundary so every downstream reference return,
@@ -1034,11 +1046,13 @@ def selection_rebalance_candidates(
             "instr_has_elig_ewmac_rule"
         ),
     )
-    if signal_model == CARRY_MODEL:
+    if signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
         selected = selected.with_columns(
-            pl.col(rule_count).alias("elig_carry_rule_count"),
-            pl.col(rule_list).alias("elig_carry_rules"),
-            pl.col(rule_flag).alias("instr_has_elig_carry_rule"),
+            pl.col("ref_elig_carry_rule_count").alias("elig_carry_rule_count"),
+            pl.col("ref_elig_carry_rules").alias("elig_carry_rules"),
+            pl.col("ref_instr_has_elig_carry_rule").alias(
+                "instr_has_elig_carry_rule"
+            ),
         )
     columns = [
         name for name in SELECTION_CANDIDATE_COLUMNS

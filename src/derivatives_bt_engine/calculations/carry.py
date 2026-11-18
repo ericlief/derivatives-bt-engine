@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 CALENDAR_DAYS_IN_YEAR = 365.25
 CARRY_MODEL = "carry"
+EWMAC_CARRY_MODEL = "ewmac_carry"
 # AFTS strategy ten defines Carry5/20/60/120 as pandas EWMA spans. The pinned
 # pysystemtrade implementation instead passes its own 10/30/60/125 values as
 # positional pandas ``com`` arguments; that separate convention is useful for
@@ -653,6 +654,8 @@ def combine_trend_and_carry_forecasts(
         "forecast_end": valid.get_column("date").max() if valid.height else None,
         "trend_family_weight": trend_weight,
         "carry_family_weight": carry_weight,
+        "trend_forecast_elig": bool(trend.audit.get("forecast_elig", True)),
+        "carry_forecast_elig": bool(carry.audit.get("forecast_elig", True)),
         "final_rule_n": len(final_weights),
         "combined_nulls": frame.get_column("combined_forecast").null_count(),
         "combined_nonfinite": frame.filter(
@@ -661,7 +664,10 @@ def combine_trend_and_carry_forecasts(
         ).height,
     }
     audit["forecast_elig"] = bool(
-        valid.height >= min_valid_observations and audit["combined_nonfinite"] == 0
+        valid.height >= min_valid_observations
+        and audit["combined_nonfinite"] == 0
+        and audit["trend_forecast_elig"]
+        and audit["carry_forecast_elig"]
     )
     audit["forecast_excl"] = (
         ""
@@ -670,6 +676,10 @@ def combine_trend_and_carry_forecasts(
             "insufficient_valid_forecast_obs"
             if valid.height < min_valid_observations
             else "nonfinite_combined_forecast"
+            if audit["combined_nonfinite"]
+            else str(carry.audit.get("forecast_excl") or "carry_forecast_ineligible")
+            if not audit["carry_forecast_elig"]
+            else str(trend.audit.get("forecast_excl") or "trend_forecast_ineligible")
         )
     )
     return CombinedForecastResult(frame, final_weights, fdm, audit)

@@ -113,14 +113,18 @@ from derivatives_bt_engine.calculations.carry import (
     AFT_CARRY_ANNUAL_TRADES,
     CARRY_FORECAST_CAP,
     CARRY_FORECAST_SCALAR,
+    EWMAC_CARRY_MODEL,
     CARRY_MAX_SMOOTHING_GAP_DAYS,
     CARRY_MAX_STALE_DAYS,
     CARRY_MIN_POST_WARMUP_COVERAGE,
     CARRY_MODEL,
     CARRY_SMOOTH_SPANS,
     CARRY_TURNOVER_SOURCE,
+    DEFAULT_CARRY_FAMILY_WEIGHT,
+    DEFAULT_TREND_FAMILY_WEIGHT,
     aft_final_rule_fdm,
     build_carry_forecast,
+    combine_trend_and_carry_forecasts,
 )
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
@@ -213,7 +217,13 @@ EWMAC_SLOW_TILT_60_40 = {
     "32/128": 0.30,
     "64/256": 0.30,
 }
-SIGNAL_MODELS = ("multi_ewmac", RETURN_TSMOM_MODEL, GOULDING_MODEL, CARRY_MODEL)
+SIGNAL_MODELS = (
+    "multi_ewmac",
+    RETURN_TSMOM_MODEL,
+    GOULDING_MODEL,
+    CARRY_MODEL,
+    EWMAC_CARRY_MODEL,
+)
 DIRECT_SIGNAL_MODELS = (RETURN_TSMOM_MODEL, GOULDING_MODEL, CARRY_MODEL)
 
 
@@ -1352,7 +1362,9 @@ def parse_args(argv=None, *, complete_default: bool = False):
             "the existing cost-gated rule combination; 'return_tsmom' uses "
             "the original continuous return signal; 'goulding' uses the "
             "monthly pooled Goulding signal; 'carry' uses the cost-gated "
-            "AFTS Carry5/20/60/120 family. All models retain the same "
+            "AFTS Carry5/20/60/120 family; 'ewmac_carry' blends eligible "
+            "EWMAC and carry rules 60/40 before final-rule FDM. All models "
+            "retain the same "
             "selection, roll schedule, buffering, and cost path."
         ),
     )
@@ -1803,6 +1815,8 @@ def _signal_report_prefix(args: argparse.Namespace) -> str:
         return f"goulding_{args.goulding_signal_mode}"
     if args.signal_model == CARRY_MODEL:
         return CARRY_MODEL
+    if args.signal_model == EWMAC_CARRY_MODEL:
+        return EWMAC_CARRY_MODEL
     return "multi_speed_ewmac"
 
 
@@ -1893,6 +1907,8 @@ def _selection_scenario_id(
         tokens[:0] = [GOULDING_MODEL, args.goulding_signal_mode]
     elif args.signal_model == CARRY_MODEL:
         tokens[:0] = [CARRY_MODEL]
+    elif args.signal_model == EWMAC_CARRY_MODEL:
+        tokens[:0] = [EWMAC_CARRY_MODEL]
     else:
         tokens.append(f"fdm{_number_token(args.forecast_fdm)}")
     if (
@@ -3589,9 +3605,10 @@ def _run_complete_selection(
     ``selected`` contains one row per executable symbol from candidate filtering. The
     function first builds reusable history-level forecasts, then creates a
     symbol-level subsystem using the configured signal model. Multi speed
-    EWMAC uses each symbol's eligible-rule subset; return TSMOM uses the
-    configured fast and slow return horizons; Goulding uses monthly forecasts
-    with economic-subclass pooled, expanding calibration.
+    EWMAC uses each symbol's eligible-rule subset; the combined EWMAC/carry
+    model uses both eligible subsets at fixed 60/40 family weights; return
+    TSMOM uses the configured fast and slow return horizons; Goulding uses
+    monthly forecasts with economic-subclass pooled, expanding calibration.
     It persists the daily forecast panel, audit, correlation input, greedy
     trials, and final accepted book.
 
@@ -3732,18 +3749,35 @@ def _run_complete_selection(
     for row in selected.iter_rows(named=True):
         symbol = str(row["symbol"])
         history_code = str(row["hist_instr_code"])
-        if args.signal_model == CARRY_MODEL:
+        if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
             rules = _parse_rules(str(row.get("elig_carry_rules") or ""))
             carry_smooths = _carry_rule_smooths(rules)
-            forecast_weights = {
-                f"carry{smooth}": 1.0 / len(carry_smooths)
-                for smooth in carry_smooths
-            }
-            forecast_fdm = aft_final_rule_fdm(len(carry_smooths))
             carry_turnover_estimates = _carry_turnover_estimates(
                 row,
                 carry_smooths,
             )
+            if args.signal_model == CARRY_MODEL:
+                forecast_weights = {
+                    f"carry{smooth}": 1.0 / len(carry_smooths)
+                    for smooth in carry_smooths
+                }
+                forecast_fdm = aft_final_rule_fdm(len(carry_smooths))
+            else:
+                rules = _parse_rules(str(row["elig_ewmac_rules"] or ""))
+                trend_weights = slow_tilt_ewmac_weights(rules)
+                forecast_weights = {
+                    **{
+                        f"trend:{rule}": DEFAULT_TREND_FAMILY_WEIGHT * weight
+                        for rule, weight in trend_weights.items()
+                    },
+                    **{
+                        f"carry:carry{smooth}": (
+                            DEFAULT_CARRY_FAMILY_WEIGHT / len(carry_smooths)
+                        )
+                        for smooth in carry_smooths
+                    },
+                }
+                forecast_fdm = aft_final_rule_fdm(len(forecast_weights))
         elif args.signal_model in DIRECT_SIGNAL_MODELS:
             rules: list[str] = []
             forecast_weights = {args.signal_model: 1.0}
@@ -3785,6 +3819,27 @@ def _run_complete_selection(
             "multiplier": float(row["mult"]),
             "target_abs_forecast": engine.config.target_abs_forecast,
         }
+        if args.signal_model == EWMAC_CARRY_MODEL:
+            reference_base_identity["signal_model"] = args.signal_model
+            reference_base_identity["carry"] = {
+                "smooth_spans": carry_smooths,
+                "forecast_scalar": CARRY_FORECAST_SCALAR,
+                "forecast_cap": CARRY_FORECAST_CAP,
+                "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+                "max_stale_days": CARRY_MAX_STALE_DAYS,
+                "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
+                "turnover_estimates": carry_turnover_estimates,
+                "turnover_source": CARRY_TURNOVER_SOURCE,
+                "afts_turnover_reference": {
+                    str(smooth): AFT_CARRY_ANNUAL_TRADES[smooth]
+                    for smooth in carry_smooths
+                },
+            }
+            reference_base_identity["trend_carry_blend"] = {
+                "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
+                "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
+                "carry_rules": carry_smooths,
+            }
         if args.signal_model == RETURN_TSMOM_MODEL:
             reference_base_identity["signal_model"] = args.signal_model
             reference_base_identity["return_tsmom"] = {
@@ -4020,6 +4075,33 @@ def _run_complete_selection(
                         history=frames_by_history[history_code],
                         min_valid_observations=args.min_forecast_obs,
                     )
+                elif args.signal_model == EWMAC_CARRY_MODEL:
+                    trend_result = engine.combine(
+                        frames_by_history[history_code],
+                        rules,
+                        forecast_correlation,
+                        correlation_rules,
+                    )
+                    carry_cache_spec = _carry_forecast_cache_spec(
+                        backtest_cache_root,
+                        artifact="carry_reference_forecast",
+                        history_code=history_code,
+                        history_db_identity=history_db_identity,
+                        smooth_spans=carry_smooths,
+                        min_valid_observations=args.min_forecast_obs,
+                    )
+                    carry_result = _load_or_build_carry_forecast(
+                        carry_cache_spec,
+                        history=reference_history_provider.load(history_code),
+                        min_valid_observations=args.min_forecast_obs,
+                    )
+                    result = combine_trend_and_carry_forecasts(
+                        trend_result,
+                        carry_result,
+                        trend_weight=DEFAULT_TREND_FAMILY_WEIGHT,
+                        carry_weight=DEFAULT_CARRY_FAMILY_WEIGHT,
+                        min_valid_observations=args.min_forecast_obs,
+                    )
                 else:
                     result = engine.combine(
                         frames_by_history[history_code],
@@ -4157,7 +4239,7 @@ def _run_complete_selection(
         # historical no-gap policy.
         reference_return_coverage_eligible = (
             reference_return_coverage >= CARRY_MIN_POST_WARMUP_COVERAGE
-            if args.signal_model == CARRY_MODEL
+            if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL)
             else reference_return_post_start_invalid == 0
         )
         fx_missing_obs = reference_frame.filter(
@@ -4194,7 +4276,7 @@ def _run_complete_selection(
         elif not reference_return_coverage_eligible:
             subsystem_excl = (
                 "insufficient_ref_return_coverage"
-                if args.signal_model == CARRY_MODEL
+                if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL)
                 else "ref_return_gaps_after_start"
             )
         else:
@@ -4211,7 +4293,7 @@ def _run_complete_selection(
             "fdm": forecast_fdm,
             "carry_turnover_estimates": (
                 json.dumps(carry_turnover_estimates, sort_keys=True)
-                if args.signal_model == CARRY_MODEL
+                if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL)
                 else ""
             ),
             "carry_turnover_reference": (
@@ -4222,7 +4304,7 @@ def _run_complete_selection(
                     },
                     sort_keys=True,
                 )
-                if args.signal_model == CARRY_MODEL
+                if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL)
                 else ""
             ),
             "comb_turnover": combined_turnover,
@@ -4240,7 +4322,7 @@ def _run_complete_selection(
             "ref_return_post_start_coverage": reference_return_coverage,
             "ref_return_min_coverage": (
                 CARRY_MIN_POST_WARMUP_COVERAGE
-                if args.signal_model == CARRY_MODEL
+                if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL)
                 else 1.0
             ),
             "ref_return_start": first_reference_return_date,
@@ -4281,7 +4363,7 @@ def _run_complete_selection(
                 hist_instr_code=str(row["hist_instr_code"]),
             )
         )
-        if args.signal_model == CARRY_MODEL:
+        if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
             # The static forecast now owns the expensive calculation state on
             # disk. Carry does not use a pooled in-memory calibration object,
             # so retaining every full history until the universe loop ends
@@ -4927,24 +5009,49 @@ def _run_complete_selection(
                 for symbol in symbols_by_history_code[history_code]:
                     row = source_rows[symbol]
                     try:
-                        if args.signal_model == CARRY_MODEL:
-                            rules = _parse_rules(
+                        if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
+                            carry_rules = _parse_rules(
                                 str(row.get("elig_carry_rules") or "")
                             )
-                            carry_smooths = _carry_rule_smooths(rules)
-                            stitched_forecast_weights = {
-                                f"carry{smooth}": 1.0 / len(carry_smooths)
-                                for smooth in carry_smooths
-                            }
-                            stitched_forecast_fdm = aft_final_rule_fdm(
-                                len(carry_smooths)
-                            )
+                            carry_smooths = _carry_rule_smooths(carry_rules)
                             carry_turnover_estimates = (
                                 _carry_turnover_estimates(
                                     row,
                                     carry_smooths,
                                 )
                             )
+                            if args.signal_model == CARRY_MODEL:
+                                rules = carry_rules
+                                stitched_forecast_weights = {
+                                    f"carry{smooth}": 1.0 / len(carry_smooths)
+                                    for smooth in carry_smooths
+                                }
+                                stitched_forecast_fdm = aft_final_rule_fdm(
+                                    len(carry_smooths)
+                                )
+                            else:
+                                rules = _parse_rules(
+                                    str(row["elig_ewmac_rules"] or "")
+                                )
+                                trend_weights = slow_tilt_ewmac_weights(rules)
+                                stitched_forecast_weights = {
+                                    **{
+                                        f"trend:{rule}": (
+                                            DEFAULT_TREND_FAMILY_WEIGHT * weight
+                                        )
+                                        for rule, weight in trend_weights.items()
+                                    },
+                                    **{
+                                        f"carry:carry{smooth}": (
+                                            DEFAULT_CARRY_FAMILY_WEIGHT
+                                            / len(carry_smooths)
+                                        )
+                                        for smooth in carry_smooths
+                                    },
+                                }
+                                stitched_forecast_fdm = aft_final_rule_fdm(
+                                    len(stitched_forecast_weights)
+                                )
                         elif args.signal_model in DIRECT_SIGNAL_MODELS:
                             rules = []
                             stitched_forecast_weights = {
@@ -5019,7 +5126,10 @@ def _run_complete_selection(
                                     goulding_cluster_by_history.items()
                                 ),
                             }
-                        elif args.signal_model == CARRY_MODEL:
+                        elif args.signal_model in (
+                            CARRY_MODEL,
+                            EWMAC_CARRY_MODEL,
+                        ):
                             stitched_identity["signal_model"] = args.signal_model
                             stitched_identity["carry"] = {
                                 "smooth_spans": carry_smooths,
@@ -5041,6 +5151,12 @@ def _run_complete_selection(
                                     for smooth in carry_smooths
                                 },
                             }
+                            if args.signal_model == EWMAC_CARRY_MODEL:
+                                stitched_identity["trend_carry_blend"] = {
+                                    "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
+                                    "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
+                                    "carry_rules": carry_smooths,
+                                }
                         (
                             stitched_reference_path,
                             stitched_manifest_path,
@@ -5117,6 +5233,34 @@ def _run_complete_selection(
                                 stitched_result = _load_or_build_carry_forecast(
                                     carry_cache_spec,
                                     history=stitched_history,
+                                    min_valid_observations=args.min_forecast_obs,
+                                )
+                            elif args.signal_model == EWMAC_CARRY_MODEL:
+                                trend_result = engine.combine(
+                                    stitched_component,
+                                    rules,
+                                    forecast_correlation,
+                                    correlation_rules,
+                                )
+                                carry_cache_spec = _carry_forecast_cache_spec(
+                                    backtest_cache_root,
+                                    artifact="carry_stitched_forecast",
+                                    history_code=history_code,
+                                    history_db_identity=history_db_identity,
+                                    smooth_spans=carry_smooths,
+                                    min_valid_observations=args.min_forecast_obs,
+                                    source_identity=stitched_source_identity,
+                                )
+                                carry_result = _load_or_build_carry_forecast(
+                                    carry_cache_spec,
+                                    history=stitched_history,
+                                    min_valid_observations=args.min_forecast_obs,
+                                )
+                                stitched_result = combine_trend_and_carry_forecasts(
+                                    trend_result,
+                                    carry_result,
+                                    trend_weight=DEFAULT_TREND_FAMILY_WEIGHT,
+                                    carry_weight=DEFAULT_CARRY_FAMILY_WEIGHT,
                                     min_valid_observations=args.min_forecast_obs,
                                 )
                             else:
@@ -5365,6 +5509,19 @@ def _run_complete_selection(
         }
     elif args.signal_model == CARRY_MODEL:
         selection_policy_identity["carry"] = {
+            "available_smooth_spans": CARRY_SMOOTH_SPANS,
+            "forecast_scalar": CARRY_FORECAST_SCALAR,
+            "forecast_cap": CARRY_FORECAST_CAP,
+            "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+            "max_stale_days": CARRY_MAX_STALE_DAYS,
+            "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
+            "turnover_source": CARRY_TURNOVER_SOURCE,
+            "afts_turnover_reference": AFT_CARRY_ANNUAL_TRADES,
+        }
+    elif args.signal_model == EWMAC_CARRY_MODEL:
+        selection_policy_identity["trend_carry_blend"] = {
+            "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
+            "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
             "available_smooth_spans": CARRY_SMOOTH_SPANS,
             "forecast_scalar": CARRY_FORECAST_SCALAR,
             "forecast_cap": CARRY_FORECAST_CAP,
