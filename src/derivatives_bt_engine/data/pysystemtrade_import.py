@@ -37,7 +37,7 @@ from derivatives_bt_engine.data.pysystemtrade_classification import (
 
 logger = setup_logger()
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_GLOBEX_DB_PATH = Path("/home/dev/fin/db/globex_mdp_3.0.duckdb")
 
 _MULTIPLE_SCHEMA = {
@@ -809,20 +809,33 @@ def _validate_import(
 
 
 def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
-    """Materialize one last-complete observation per normalized session.
+    """Materialize one last-complete observation per Monday-Friday session.
 
     The shipped files mix historical 23:00 daily observations with irregular
-    intraday snapshots.  After Sunday-to-Monday normalization, the latest
-    complete timestamp is the session close: normally 23:00, or the final
-    available complete snapshot when 23:00 is absent.  Selection is performed
-    independently for adjusted prices, marks, roll inputs, and carry because
-    their validity requirements differ.  Full-frequency raw roll inputs remain
-    authoritative for reconstructing Panama prices; this daily table is an
-    inspectable EOD projection, not the stitch input.
+    intraday snapshots. Weekend observations are assigned to the following
+    Monday, and the latest complete timestamp for an instrument/session wins.
+    Raw rows and their original ``source_timestamp`` remain intact. Selection
+    is performed independently for adjusted prices, marks, roll inputs, and
+    carry because their validity requirements differ. Full-frequency raw roll
+    inputs remain authoritative for reconstructing Panama prices; these daily
+    tables are inspectable weekday projections, not the stitch input.
     """
     con.execute(
         """
         CREATE TABLE daily.adjusted_prices AS
+        WITH normalized AS (
+            SELECT
+                instrument_code,
+                CASE EXTRACT(ISODOW FROM source_timestamp)
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    ELSE CAST(source_timestamp AS DATE)
+                END AS trade_date,
+                source_timestamp,
+                adjusted_price,
+                source_file
+            FROM raw.adjusted_prices
+        )
         SELECT
             instrument_code,
             trade_date,
@@ -833,7 +846,7 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
                 ELSE 'last_complete'
             END AS selection_policy,
             source_file
-        FROM raw.adjusted_prices
+        FROM normalized
         WHERE adjusted_price IS NOT NULL
         QUALIFY row_number() OVER (
             PARTITION BY instrument_code, trade_date
@@ -845,6 +858,20 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
         CREATE TABLE daily.marks AS
+        WITH normalized AS (
+            SELECT
+                instrument_code,
+                CASE EXTRACT(ISODOW FROM source_timestamp)
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    ELSE CAST(source_timestamp AS DATE)
+                END AS trade_date,
+                source_timestamp,
+                price,
+                price_contract,
+                source_file
+            FROM raw.multiple_prices
+        )
         SELECT
             instrument_code,
             trade_date,
@@ -856,7 +883,7 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
                 ELSE 'last_complete'
             END AS selection_policy,
             source_file
-        FROM raw.multiple_prices
+        FROM normalized
         WHERE price IS NOT NULL
           AND price_contract IS NOT NULL
         QUALIFY row_number() OVER (
@@ -869,6 +896,22 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
         CREATE TABLE daily.roll_inputs AS
+        WITH normalized AS (
+            SELECT
+                instrument_code,
+                CASE EXTRACT(ISODOW FROM source_timestamp)
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    ELSE CAST(source_timestamp AS DATE)
+                END AS trade_date,
+                source_timestamp,
+                price,
+                price_contract,
+                forward,
+                forward_contract,
+                source_file
+            FROM raw.multiple_prices
+        )
         SELECT
             instrument_code,
             trade_date,
@@ -882,7 +925,7 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
                 ELSE 'last_complete'
             END AS selection_policy,
             source_file
-        FROM raw.multiple_prices
+        FROM normalized
         WHERE price IS NOT NULL
           AND price_contract IS NOT NULL
         QUALIFY row_number() OVER (
@@ -895,6 +938,22 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
         CREATE TABLE daily.carry AS
+        WITH normalized AS (
+            SELECT
+                instrument_code,
+                CASE EXTRACT(ISODOW FROM source_timestamp)
+                    WHEN 6 THEN CAST(source_timestamp AS DATE) + 2
+                    WHEN 7 THEN CAST(source_timestamp AS DATE) + 1
+                    ELSE CAST(source_timestamp AS DATE)
+                END AS trade_date,
+                source_timestamp,
+                price,
+                price_contract,
+                carry,
+                carry_contract,
+                source_file
+            FROM raw.multiple_prices
+        )
         SELECT
             instrument_code,
             trade_date,
@@ -908,7 +967,7 @@ def _create_daily_tables(con: duckdb.DuckDBPyConnection) -> None:
                 ELSE 'last_complete'
             END AS selection_policy,
             source_file
-        FROM raw.multiple_prices
+        FROM normalized
         WHERE price IS NOT NULL
           AND carry IS NOT NULL
           AND price_contract IS NOT NULL
@@ -1033,7 +1092,7 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
         """
         CREATE TABLE qa.session_date_normalization AS
         SELECT
-            'multiple_prices' AS dataset,
+            'raw_multiple_prices' AS dataset,
             count(*) AS total_rows,
             count(*) FILTER (
                 WHERE trade_date != CAST(source_timestamp AS DATE)
@@ -1041,12 +1100,36 @@ def _create_qa_tables(con: duckdb.DuckDBPyConnection) -> None:
         FROM raw.multiple_prices
         UNION ALL
         SELECT
-            'adjusted_prices' AS dataset,
+            'raw_adjusted_prices' AS dataset,
             count(*) AS total_rows,
             count(*) FILTER (
                 WHERE trade_date != CAST(source_timestamp AS DATE)
             ) AS shifted_rows
         FROM raw.adjusted_prices
+        UNION ALL
+        SELECT
+            'daily_marks' AS dataset,
+            count(*) AS total_rows,
+            count(*) FILTER (
+                WHERE trade_date != CAST(source_timestamp AS DATE)
+            ) AS shifted_rows
+        FROM daily.marks
+        UNION ALL
+        SELECT
+            'daily_carry' AS dataset,
+            count(*) AS total_rows,
+            count(*) FILTER (
+                WHERE trade_date != CAST(source_timestamp AS DATE)
+            ) AS shifted_rows
+        FROM daily.carry
+        UNION ALL
+        SELECT
+            'daily_adjusted_prices' AS dataset,
+            count(*) AS total_rows,
+            count(*) FILTER (
+                WHERE trade_date != CAST(source_timestamp AS DATE)
+            ) AS shifted_rows
+        FROM daily.adjusted_prices
         ORDER BY dataset
         """
     )

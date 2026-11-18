@@ -392,23 +392,27 @@ rows therefore do not leak future values or invent cross-gap P&L.
 
 The saved carry forecast panel contains 1,202 Saturday observations across 17
 symbols. Four members of the final 2026 book have Saturday observations in
-that panel: `XINA50` (87), `SCI` (83), `MJ` (64), and `TSEREIT` (58). The
-currently available PST `daily.carry` table also contains Saturday rows for
-these instruments. `build_carry_components` applies EWMA spans directly to
-observed carry rows, so those Saturdays count as extra smoothing observations
-in this saved run. The M–F aggregation described by the user is not reflected
-in the PST carry table or saved forecast artifact inspected here; verify that
-the updated source database and cache are used before changing forecast
-smoothing. This forecast-frequency issue is separate from the implemented
-portfolio P&L resampling.
+that panel: `XINA50` (87), `SCI` (83), `MJ` (64), and `TSEREIT` (58). These
+counts describe the saved run before the weekday migration. The PST sidecar was
+rebuilt from the same pinned source at schema version 6: all derived
+`daily.adjusted_prices`, `daily.marks`, `daily.roll_inputs`, and `daily.carry`
+dates are now Monday through Friday. Raw source rows retain their original
+timestamps, including Saturdays. Carry forecasts and selection caches built
+before this migration remain unchanged; rerunning selection will rebuild them
+under the bumped history schema.
 
 The IB tail is a separate date range and has a different count. In the
 available dated-contract DB, 11 instrument histories contain Saturday bars
 after the 2024-03-29 PST handoff, through June 20, 2026. The saved cash output
 uses Saturday rows for five symbols: `SCI` (112), `XINA50` (101), `TWN` (88),
 `XIN0I` (78), and `SPI` (73). Only `SCI` and `XINA50` are in the final 2026
-book. There are no Saturday rows in the saved IB cash tail after June 20;
-the November 2026 endpoint is weekday-only. Thus the earlier 17-symbol count
+book. These are counts in the saved pre-normalization run. The shared IB
+history builder now maps Saturday and Sunday sessions to the following Monday,
+then keeps the latest observation for each contract and canonical business
+date. The raw IB daily-bar database is preserved. Update and snapshot modes
+both use this builder, and the bumped history/calendar cache versions cause
+derived histories to be rebuilt. No saved IB cash or forecast artifacts have
+been regenerated as part of this migration. Thus the earlier 17-symbol count
 describes pre-tail PST carry observations, not the number of instruments with
 Saturday sessions in the new IB tail.
 

@@ -48,11 +48,11 @@ from derivatives_bt_engine.logging_config import setup_logger
 
 logger = setup_logger()
 
-HISTORY_SCHEMA_VERSION = 12
+HISTORY_SCHEMA_VERSION = 13
 # Increment when calendar selection semantics change. This is intentionally
 # narrower than the public history schema version: it invalidates derived
 # calendar-selected caches without claiming that report columns changed.
-CALENDAR_CONTRACT_SELECTION_VERSION = 2
+CALENDAR_CONTRACT_SELECTION_VERSION = 3
 DEFAULT_PYSYSTEMTRADE_DB_PATH = Path(
     "/home/dev/fin/db/pysystemtrade_reference.duckdb"
 )

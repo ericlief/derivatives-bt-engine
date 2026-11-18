@@ -825,16 +825,42 @@ def build_ib_contract_history(
         source="reference_config",
     )
 
+    # Normalize session dates before contract selection. Weekend observations
+    # become available on the following Monday; if that contract also has a
+    # Monday bar, its later close owns the canonical session. Keep the source
+    # DB untouched so the original exchange dates remain auditable.
+    weekend_rows = contract_history.filter(
+        pl.col('date').dt.weekday() >= 6
+    ).height
+    normalized_contract_history = (
+        contract_history
+        .with_columns(pl.col('date').alias('source_session_date'))
+        .with_columns(
+            pl.when(pl.col('date').dt.weekday() == 6)
+            .then(pl.col('date') + pl.duration(days=2))
+            .when(pl.col('date').dt.weekday() == 7)
+            .then(pl.col('date') + pl.duration(days=1))
+            .otherwise(pl.col('date'))
+            .alias('date')
+        )
+        .sort('ib_contract_id', 'source_session_date', maintain_order=True)
+        .unique(
+            subset=['ib_contract_id', 'date'],
+            keep='last',
+            maintain_order=True,
+        )
+        .drop('source_session_date')
+    )
+    aggregated_weekend_rows = (
+        contract_history.height - normalized_contract_history.height
+    )
+
     # Preserve the within-contract close and IB contract month before the
     # roll-policy selection. Contract-cycle membership comes from YYYYMM,
     # while the actual expiry date controls the cutoff; these differ for
     # products such as December WTI crude, which expires in November.
     raw = (
-        contract_history.unique(
-            subset=['ib_contract_id', 'date'],
-            keep='last',
-            maintain_order=True,
-        )
+        normalized_contract_history
         .sort('ib_contract_id', 'date')
         .with_columns(
             pl.col('date')
@@ -883,6 +909,8 @@ def build_ib_contract_history(
                 'ib_contract_id'
             ).n_unique(),
             'raw_rows': contract_history.height,
+            'weekend_rows_mapped': weekend_rows,
+            'rows_collapsed_by_business_date': aggregated_weekend_rows,
             'selected_rows': selected.height,
             'minimum_contract_id': minimum_contract_id,
         },
