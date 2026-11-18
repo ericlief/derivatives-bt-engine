@@ -1485,7 +1485,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         help=(
             "IB history refresh policy. 'missing' requests IB only when no "
             "usable IB segment is cached; 'snapshot' refreshes only when the "
-            "cached tail ends before the input snapshot's ib_fast_end; "
+            "cached tail ends before the input snapshot's acquisition date; "
             "'update' refreshes every selected signal history from IB."
         ),
     )
@@ -2226,14 +2226,35 @@ def _filter_backtest_period(
     return filtered
 
 
+def _snapshot_acquisition_date(row: Mapping[str, object]) -> date | None:
+    """Resolve the snapshot as-of date before its IB daily-bar label.
+
+    The acquisition timestamp is the selection cutoff. IB daily-bar timestamps
+    can carry the following UTC calendar date, so ``ib_fast_end`` is only a
+    fallback for older reports that lack snapshot metadata.
+    """
+    snapshot_timestamp = row.get("snap_cache_ts_et")
+    if isinstance(snapshot_timestamp, datetime):
+        return snapshot_timestamp.date()
+    if isinstance(snapshot_timestamp, date):
+        return snapshot_timestamp
+    ib_fast_end = row.get("ib_fast_end")
+    if isinstance(ib_fast_end, datetime):
+        return ib_fast_end.date()
+    if isinstance(ib_fast_end, date):
+        return ib_fast_end
+    return None
+
+
 def _cap_stitched_reference_to_snapshot(
     frame: pl.DataFrame,
     snapshot_end: date | None,
 ) -> pl.DataFrame:
     """Keep a stitched executable tail no later than its market snapshot.
 
-    Daily futures dates are exchange-local, so this uses each signal's stored
-    ``ib_fast_end`` rather than one report-timezone date for the whole book.
+    Daily futures dates are exchange-local. The caller supplies the acquisition
+    date from the market snapshot; IB daily-bar timestamps can label the next
+    calendar date even when the snapshot was acquired before that session.
     """
     if snapshot_end is None:
         return frame
@@ -3811,7 +3832,7 @@ def _run_complete_selection(
     generated_at: datetime,
     run_config: dict[str, object],
     args: argparse.Namespace,
-    snapshot_ib_end_by_signal: dict[str, date],
+    snapshot_data_end_by_signal: dict[str, date],
 ) -> tuple[Path, pl.DataFrame]:
     """Audit forecasts, exclude invalid instruments, and run greedy selection.
 
@@ -4041,7 +4062,7 @@ def _run_complete_selection(
                 raise ValueError(
                     f"{history_code}: no IB signal mapping for stitched carry cache"
                 )
-            snapshot_end = snapshot_ib_end_by_signal.get(signal_symbol)
+            snapshot_end = snapshot_data_end_by_signal.get(signal_symbol)
             stitched_carry_cache_spec = _cached_stitched_carry_forecast_spec(
                 backtest_cache_root,
                 history_code=history_code,
@@ -5085,7 +5106,7 @@ def _run_complete_selection(
                                 signal_symbol = signal_symbol_by_history_code[
                                     history_code
                                 ]
-                                snapshot_end = snapshot_ib_end_by_signal.get(
+                                snapshot_end = snapshot_data_end_by_signal.get(
                                     signal_symbol
                                 )
                                 cached_end = latest_ib_signal_date(
@@ -5167,7 +5188,7 @@ def _run_complete_selection(
                     )
                     continue
                 signal_symbol = signal_symbol_by_history_code[history_code]
-                snapshot_end = snapshot_ib_end_by_signal.get(signal_symbol)
+                snapshot_end = snapshot_data_end_by_signal.get(signal_symbol)
                 source_priority = [
                     str(value)
                     for value in (
@@ -6887,11 +6908,11 @@ def run(
             generated_at=generated_at,
             run_config=config,
             args=args,
-            snapshot_ib_end_by_signal={
-                str(row["signal_symbol"]): row["ib_fast_end"]
+            snapshot_data_end_by_signal={
+                str(row["signal_symbol"]): snapshot_end
                 for row in report.iter_rows(named=True)
                 if row.get("signal_symbol")
-                and isinstance(row.get("ib_fast_end"), date)
+                and (snapshot_end := _snapshot_acquisition_date(row)) is not None
             },
         )
     return output, public_selected
