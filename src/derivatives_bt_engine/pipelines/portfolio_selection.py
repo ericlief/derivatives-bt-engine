@@ -202,7 +202,7 @@ DEFAULT_FORECAST_PROBATION_REVIEWS = 2
 # inputs remain reusable. The base version is part of the directory and content
 # identity, allowing old variants to remain without being accepted as current.
 SELECTION_BACKTEST_CACHE_VERSION = 3
-CASH_PNL_CACHE_VERSION = 2
+CASH_PNL_CACHE_VERSION = 3
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
 CARRY_FORECAST_CACHE_VERSION = 2
@@ -835,10 +835,88 @@ def _load_carry_forecast_result(
     )
 
 
+def _cached_stitched_carry_forecast_spec(
+    cache_root: Path,
+    *,
+    history_code: str,
+    smooth_spans: Iterable[int],
+    min_valid_observations: int,
+    snapshot_end: date | None,
+) -> tuple[Path, Path, dict[str, object], str]:
+    """Resolve the current stitched carry artifact from its saved manifest.
+
+    The forecast cache records the complete stitched-history content identity,
+    so selection can reuse the already-built artifact without rebuilding the
+    raw history or depending on an IB connection. A requested market snapshot
+    must match the artifact's last source date to prevent a stale cache tail.
+    """
+    rules = tuple(int(value) for value in smooth_spans)
+    directory = (
+        cache_root.expanduser().resolve()
+        / "selection_backtest"
+        / f"v{SELECTION_BACKTEST_CACHE_VERSION}"
+        / "carry_stitched_forecast"
+        / re.sub(r"[^A-Za-z0-9_.-]+", "_", history_code)
+    )
+    candidates: list[
+        tuple[date, tuple[Path, Path, dict[str, object], str]]
+    ] = []
+    for manifest_path in directory.glob("*/manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        identity = manifest.get("identity") if isinstance(manifest, dict) else None
+        if not isinstance(identity, dict):
+            continue
+        source = identity.get("source")
+        if not isinstance(source, dict):
+            continue
+        if (
+            identity.get("signal_model") != CARRY_MODEL
+            or tuple(identity.get("carry_smooth_spans") or ()) != rules
+            or identity.get("min_valid_observations") != min_valid_observations
+            or not {"pysystemtrade", "ib"}.issubset(
+                set(source.get("available_sources") or [])
+            )
+        ):
+            continue
+        try:
+            signal_end = date.fromisoformat(str(source["signal_end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if snapshot_end is not None and signal_end != snapshot_end:
+            continue
+        history_db_identity = identity.get("history_db")
+        if not isinstance(history_db_identity, dict):
+            continue
+        cache_spec = _carry_forecast_cache_spec(
+            cache_root,
+            artifact="carry_stitched_forecast",
+            history_code=history_code,
+            history_db_identity=history_db_identity,
+            smooth_spans=rules,
+            min_valid_observations=min_valid_observations,
+            source_identity=source,
+        )
+        if cache_spec[1] != manifest_path:
+            continue
+        if _load_carry_forecast_result(cache_spec) is None:
+            continue
+        candidates.append((signal_end, cache_spec))
+    if not candidates:
+        raise FileNotFoundError(
+            f"{history_code}: no complete stitched carry cache for spans "
+            f"{rules} through snapshot {snapshot_end}; rebuild the stitched "
+            "carry cache before running selection"
+        )
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def _load_or_build_carry_forecast(
     cache_spec: tuple[Path, Path, dict[str, object], str],
     *,
-    history: FuturesHistory,
+    history: FuturesHistory | pl.DataFrame | None,
     min_valid_observations: int,
 ) -> CombinedForecastResult:
     """Reuse or atomically build one static reference or stitched carry forecast."""
@@ -852,6 +930,10 @@ def _load_or_build_carry_forecast(
             cache_key,
         )
         return cached
+    if not isinstance(history, FuturesHistory):
+        raise FileNotFoundError(
+            "carry forecast cache miss requires its source FuturesHistory"
+        )
     smooths = tuple(int(value) for value in identity["carry_smooth_spans"])
     result = build_carry_forecast(
         history,
@@ -3687,6 +3769,22 @@ def _run_complete_selection(
         str(row["symbol"]): row
         for row in selected.iter_rows(named=True)
     }
+    # Resolve signal-symbol identities once so each carry model can bind its
+    # static forecast cache to the exact market snapshot being replayed.
+    stitched_signal_by_history_code: dict[str, str] = {}
+    if (
+        args.ib_history_db is not None
+        and args.signal_model == CARRY_MODEL
+    ):
+        stitched_instruments = load_pysystemtrade_ib_instruments(
+            db_path=history_db_path,
+            mapping_path=args.broker_mapping.expanduser().resolve(),
+        )
+        for instrument in stitched_instruments:
+            stitched_signal_by_history_code.setdefault(
+                str(instrument["pst_instr_code"]),
+                str(instrument["signal_symbol"]),
+            )
     return_tsmom_calibration_universe = sorted({
         str(row["hist_instr_code"])
         for row in source_rows.values()
@@ -3802,10 +3900,30 @@ def _run_complete_selection(
             )
 
         currency = str(row["ccy"]).upper()
+        stitched_carry_cache_spec = None
+        stitched_forecast_identity = None
+        stitched_history_db_identity = history_db_identity
+        snapshot_end = None
+        if args.signal_model == CARRY_MODEL and args.ib_history_db is not None:
+            signal_symbol = stitched_signal_by_history_code.get(history_code)
+            if signal_symbol is None:
+                raise ValueError(
+                    f"{history_code}: no IB signal mapping for stitched carry cache"
+                )
+            snapshot_end = snapshot_ib_end_by_signal.get(signal_symbol)
+            stitched_carry_cache_spec = _cached_stitched_carry_forecast_spec(
+                backtest_cache_root,
+                history_code=history_code,
+                smooth_spans=carry_smooths,
+                min_valid_observations=args.min_forecast_obs,
+                snapshot_end=snapshot_end,
+            )
+            stitched_forecast_identity = stitched_carry_cache_spec[2]["source"]
+            stitched_history_db_identity = stitched_carry_cache_spec[2]["history_db"]
         reference_base_identity = {
             "symbol": symbol,
             "hist_instr_code": str(row["hist_instr_code"]),
-            "history_db": history_db_identity,
+            "history_db": stitched_history_db_identity,
             "currency": currency,
             "eligible_rules": rules,
             "forecast_weights": forecast_weights,
@@ -3819,6 +3937,11 @@ def _run_complete_selection(
             "multiplier": float(row["mult"]),
             "target_abs_forecast": engine.config.target_abs_forecast,
         }
+        if stitched_forecast_identity is not None:
+            reference_base_identity["stitched_source"] = (
+                stitched_forecast_identity
+            )
+            reference_base_identity["snapshot_end"] = snapshot_end
         if args.signal_model == EWMAC_CARRY_MODEL:
             reference_base_identity["signal_model"] = args.signal_model
             reference_base_identity["carry"] = {
@@ -4025,6 +4148,7 @@ def _run_complete_selection(
                 if (
                     args.signal_model != RETURN_TSMOM_MODEL
                     and history_code not in frames_by_history
+                    and stitched_carry_cache_spec is None
                 ):
                     history = reference_history_provider.load(history_code)
                     if args.signal_model in DIRECT_SIGNAL_MODELS:
@@ -4062,17 +4186,22 @@ def _run_complete_selection(
                         goulding_reference_forecast_specs[history_code]
                     )
                 elif args.signal_model == CARRY_MODEL:
-                    carry_cache_spec = _carry_forecast_cache_spec(
-                        backtest_cache_root,
-                        artifact="carry_reference_forecast",
-                        history_code=history_code,
-                        history_db_identity=history_db_identity,
-                        smooth_spans=carry_smooths,
-                        min_valid_observations=args.min_forecast_obs,
+                    carry_cache_spec = stitched_carry_cache_spec or (
+                        _carry_forecast_cache_spec(
+                            backtest_cache_root,
+                            artifact="carry_reference_forecast",
+                            history_code=history_code,
+                            history_db_identity=history_db_identity,
+                            smooth_spans=carry_smooths,
+                            min_valid_observations=args.min_forecast_obs,
+                        )
                     )
                     result = _load_or_build_carry_forecast(
                         carry_cache_spec,
-                        history=frames_by_history[history_code],
+                        # A current stitched cache is required when IB history
+                        # is enabled; its saved curve is sufficient to replay
+                        # this forecast without reopening raw source databases.
+                        history=frames_by_history.get(history_code),
                         min_valid_observations=args.min_forecast_obs,
                     )
                 elif args.signal_model == EWMAC_CARRY_MODEL:
@@ -4108,6 +4237,17 @@ def _run_complete_selection(
                         rules,
                         forecast_correlation,
                         correlation_rules,
+                    )
+                # A market snapshot defines the final usable session for both
+                # the forecast report and the cached executable tail. Keep the
+                # full history in the content-addressed forecast artifact, then
+                # clip only the report/replay frame to avoid future IB rows.
+                if snapshot_end is not None:
+                    result = CombinedForecastResult(
+                        frame=result.frame.filter(pl.col("date") <= snapshot_end),
+                        weights=result.weights,
+                        fdm=result.fdm,
+                        audit=result.audit,
                     )
                 forecast_audit = result.audit
                 fx_error = ""
@@ -5592,6 +5732,8 @@ def _run_complete_selection(
                 "net_pnl",
                 "pnl_valid",
                 "hist_quality",
+                "source_segment",
+                "live_tail_start",
             ),
         )
         if cached_cash is None:
@@ -5617,6 +5759,14 @@ def _run_complete_selection(
                 if cash_frame.get_column("roll_event").any()
                 else "no_history_roll_markers"
             )
+            live_tail_start = live_tail_start_by_symbol.get(symbol)
+            source_segment = (
+                pl.when(pl.col("date") >= live_tail_start)
+                .then(pl.lit("ib"))
+                .otherwise(pl.lit("pysystemtrade"))
+                if live_tail_start is not None
+                else pl.lit("pysystemtrade")
+            )
             cash_output_frame = cash_frame.with_columns(
                 (
                     pl.col("hist_quality")
@@ -5634,6 +5784,8 @@ def _run_complete_selection(
                 pl.lit(historical_return_sources[symbol]).alias(
                     "historical_return_source"
                 ),
+                source_segment.alias("source_segment"),
+                pl.lit(live_tail_start, dtype=pl.Date).alias("live_tail_start"),
                 pl.lit(str(row.get("roll_policy_id") or "")).alias(
                     "roll_policy_id"
                 ),
@@ -5652,6 +5804,8 @@ def _run_complete_selection(
                 "symbol",
                 "hist_instr_code",
                 "historical_return_source",
+                "source_segment",
+                "live_tail_start",
                 "roll_policy_id",
                 "roll_schedule_src",
                 "weight",

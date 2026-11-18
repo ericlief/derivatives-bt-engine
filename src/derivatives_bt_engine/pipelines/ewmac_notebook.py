@@ -229,9 +229,11 @@ def plot_selection_cash_pnl(
         raise KeyError(f"symbols are not present in cash-P&L frame: {unknown}")
 
     symbol_frames = {}
+    handoff_by_symbol: dict[str, date | datetime] = {}
     for symbol in selected_symbols:
+        full_symbol_frame = frame.filter(pl.col("symbol") == symbol).sort("date")
         symbol_frame = _date_slice(
-            frame.filter(pl.col("symbol") == symbol),
+            full_symbol_frame,
             start=start,
             end=end,
         ).sort("date")
@@ -239,6 +241,35 @@ def plot_selection_cash_pnl(
             raise ValueError(
                 f"no cash-P&L observations for {symbol} in the requested date range"
             )
+        if "source_segment" in symbol_frame.columns:
+            ib_dates = full_symbol_frame.filter(
+                pl.col("source_segment") == "ib"
+            ).get_column("date")
+            declared = []
+            if "live_tail_start" in full_symbol_frame.columns:
+                declared = (
+                    full_symbol_frame.get_column("live_tail_start")
+                    .drop_nulls()
+                    .unique()
+                    .to_list()
+                )
+                if len(declared) > 1:
+                    raise ValueError(
+                        f"{symbol}: cash-P&L rows contain inconsistent IB handoffs"
+                    )
+                if declared and ib_dates.len() and declared[0] != ib_dates.min():
+                    raise ValueError(
+                        f"{symbol}: first IB-owned cash row {ib_dates.min()} does "
+                        f"not match declared handoff {declared[0]}"
+                    )
+            if ib_dates.len():
+                handoff = declared[0] if declared else ib_dates.min()
+                if (
+                    symbol_frame.get_column("date").min()
+                    <= handoff
+                    <= symbol_frame.get_column("date").max()
+                ):
+                    handoff_by_symbol[symbol] = handoff
         symbol_frames[symbol] = symbol_frame
 
     def line_panel(
@@ -289,13 +320,25 @@ def plot_selection_cash_pnl(
     def plot_symbol(symbol: str):
         """Build all independently scaled panels for one selected symbol."""
         symbol_frame = symbol_frames[symbol]
+        forecast_panel = line_panel(
+            symbol_frame,
+            columns=["comb_fcst"],
+            title=(
+                f"{symbol} combined forecast (red dashed: IB handoff)"
+                if symbol in handoff_by_symbol
+                else f"{symbol} combined forecast"
+            ),
+            ylabel="Forecast",
+        ) * hv.HLine(0.0).opts(color="black", line_width=1)
+        if symbol in handoff_by_symbol:
+            forecast_panel *= hv.VLine(handoff_by_symbol[symbol]).opts(
+                color="#d62728",
+                line_dash="dashed",
+                line_width=1,
+                tools=["hover"],
+            )
         panels = [
-            line_panel(
-                symbol_frame,
-                columns=["comb_fcst"],
-                title=f"{symbol} combined forecast",
-                ylabel="Forecast",
-            ) * hv.HLine(0.0).opts(color="black", line_width=1),
+            forecast_panel,
             line_panel(
                 symbol_frame,
                 columns=["vol_scalar", "tgt_pos", "held_con"],

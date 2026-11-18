@@ -431,6 +431,8 @@ PUBLIC_COLUMN_TOKEN_ABBREVIATIONS = {
 CASH_PNL_REPORT_PRIORITY = (
     "symbol",
     "date",
+    "source_segment",
+    "live_tail_start",
     "sel_active",
     "sel_rebalanced",
     "sel_date",
