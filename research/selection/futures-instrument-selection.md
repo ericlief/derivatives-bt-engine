@@ -1425,9 +1425,21 @@ futures-market-snapshot \
   --instruments all-pysystemtrade \
   --vol-source pysystemtrade \
   --cache /home/dev/data/fin/misc/cache/futures \
+  --ib-history-db /home/dev/fin/db/ib_futures_history.duckdb \
+  --ib-history-prior-years 3 \
   --ib-account-name taxable \
   --snapshot-output /home/dev/data/fin/misc/results/futures_market_snapshot.parquet
 ```
+
+Supplying `--ib-history-db` also updates the raw dated-contract database and
+builds v15 stitched-history bundles for every unique signal in the requested
+instrument universe. It uses the existing PST prefix and fetches the configured
+number of recent calendar years from IB; `--duration 1Y` remains the separate
+lookback for the market snapshot's volatility inputs. Without
+`--ib-history-db`, the command saves only the point-in-time market snapshot and
+does not import raw IB bars. `--history-db` is the PySystemTrade reference
+database and is never the raw IB write target. The later `futures-rule-cache`
+command is offline and does not import IB history.
 
 Omitting both account options selects `managedAccounts[0]`. Pass an account
 name explicitly when commission tiers, current positions, or margin differ

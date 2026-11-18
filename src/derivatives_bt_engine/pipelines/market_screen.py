@@ -106,6 +106,11 @@ from derivatives_bt_engine.data.futures_history import (
     DEFAULT_PYSYSTEMTRADE_DB_PATH,
     PysystemtradeHistoryProvider,
 )
+from derivatives_bt_engine.data.ib_futures_dataloader import (
+    DEFAULT_BROKER_MAPPING_PATH,
+    DEFAULT_MAX_SOURCE_GAP_DAYS,
+    IBStitchedHistoryProvider,
+)
 from derivatives_bt_engine.calculations.instruments import (
     get_spec,
     resolve_annualization_days,
@@ -3581,6 +3586,25 @@ def parse_args(
         help="Historical signal database used for volatility and EWMAC calibration.",
     )
     parser.add_argument(
+        "--ib-history-db",
+        type=Path,
+        help=(
+            "In snapshot mode, update this raw IB dated-contract database and "
+            "build stitched histories for every requested mapped futures "
+            "instrument. Omit to acquire the market snapshot without writing "
+            "raw IB history."
+        ),
+    )
+    parser.add_argument(
+        "--ib-history-prior-years",
+        type=int,
+        default=3,
+        help=(
+            "Calendar years of dated IB contracts to import per instrument "
+            "when --ib-history-db is supplied (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
         "--cache",
         type=Path,
         required=True,
@@ -4785,12 +4809,129 @@ def _emit_report(
     return output_report
 
 
+def _update_ib_history_universe(
+    ib: IBPySync,
+    instruments: list[dict],
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Import stitched IB history for every unique mapped snapshot signal.
+
+    The raw IB database is an explicit write target. Each signal history is
+    updated from its PST/IB stitched view so raw dated-contract bars and the
+    reusable v15 stitched bundle cover the same requested universe.
+    Per-instrument failures are collected after remaining mappings are tried.
+    """
+    if args.ib_history_db is None:
+        return {"requested": 0, "updated": 0, "unavailable": [], "failed": []}
+    signal_instruments: dict[str, dict] = {}
+    failed: list[dict[str, str]] = []
+    for instrument in instruments:
+        try:
+            signal_symbol = resolve_signal_symbol(instrument)
+        except Exception as exc:
+            failed.append({
+                "instrument": str(instrument.get("symbol") or "unknown"),
+                "reason": str(exc),
+            })
+            continue
+        signal_instruments.setdefault(signal_symbol, instrument)
+
+    unavailable: list[str] = []
+    updated = 0
+    total = len(signal_instruments)
+    for completed, (signal_symbol, instrument) in enumerate(
+        signal_instruments.items(),
+        start=1,
+    ):
+        try:
+            history = IBStitchedHistoryProvider(
+                ib=ib,
+                as_of=date.today(),
+                prior_years=args.ib_history_prior_years,
+                reference_db_path=args.history_db.expanduser().resolve(),
+                mapping_path=DEFAULT_BROKER_MAPPING_PATH,
+                history_db_path=args.ib_history_db.expanduser().resolve(),
+                cache_root=args.cache.expanduser().resolve(),
+                include_globex=False,
+                preserve_reference_overlap=True,
+                use_cache=True,
+                save_cache=True,
+                update_history=True,
+                max_source_gap_days=DEFAULT_MAX_SOURCE_GAP_DAYS,
+            ).load(signal_symbol)
+            available_sources = {
+                str(value)
+                for value in (history.metadata.get("available_sources") or [])
+            }
+            ib_end = None
+            if "source_segment" in history.signal.columns:
+                ib_signal = history.signal.filter(
+                    pl.col("source_segment") == "ib"
+                )
+                if not ib_signal.is_empty():
+                    ib_end = ib_signal.get_column("date").max()
+            if "ib" in available_sources:
+                updated += 1
+                log.info(
+                    "ib_history_universe progress=%d/%d symbol=%s "
+                    "signal_symbol=%s ib_end=%s",
+                    completed,
+                    total,
+                    instrument.get("symbol"),
+                    signal_symbol,
+                    ib_end,
+                )
+            else:
+                unavailable.append(signal_symbol)
+                log.warning(
+                    "ib_history_universe unavailable progress=%d/%d "
+                    "symbol=%s signal_symbol=%s reason=no_ib_segment",
+                    completed,
+                    total,
+                    instrument.get("symbol"),
+                    signal_symbol,
+                )
+        except Exception as exc:
+            failed.append({"instrument": signal_symbol, "reason": str(exc)})
+            log.warning(
+                "ib_history_universe failed progress=%d/%d symbol=%s "
+                "signal_symbol=%s reason=%s",
+                completed,
+                total,
+                instrument.get("symbol"),
+                signal_symbol,
+                exc,
+            )
+    summary = {
+        "requested": total,
+        "updated": updated,
+        "unavailable": unavailable,
+        "failed": failed,
+    }
+    log.info(
+        "ib_history_universe complete requested=%d updated=%d "
+        "unavailable=%d failed=%d database=%s",
+        total,
+        updated,
+        len(unavailable),
+        len(failed),
+        args.ib_history_db,
+    )
+    print(
+        "IB history import: "
+        f"updated {updated}/{total}, unavailable={len(unavailable)}, "
+        f"failed={len(failed)}"
+    )
+    return summary
+
+
 def _acquire_live_market_rows(
     args: argparse.Namespace,
     instruments: list[dict],
     *,
     pysystemtrade_provider: Optional[PysystemtradeHistoryProvider],
     reference_fx_by_currency: dict[str, dict],
+    update_ib_history: bool = False,
 ) -> list[dict]:
     """Acquire the IB-dependent inputs needed by later selection phases.
 
@@ -4800,6 +4941,7 @@ def _acquire_live_market_rows(
     capital, cost-limit, affordability, or selection-eligibility policy is
     applied here, which makes the result safe to cache and reuse.
     """
+    history_instruments = list(instruments)
     instruments = _snapshot_execution_universe(instruments)
     log.info(
         "futures_market_snapshot start instruments=%d duration=%s "
@@ -4921,6 +5063,8 @@ def _acquire_live_market_rows(
                         fx_by_currency=fx_by_currency,
                     )
                 )
+        if update_ib_history and args.ib_history_db is not None:
+            _update_ib_history_universe(ib, history_instruments, args)
     finally:
         ib.disconnect()
     return rows
@@ -5519,6 +5663,13 @@ def run(
         raise ValueError("--snapshot-input and --offline are mutually exclusive")
     if snapshot_only and args.offline:
         raise ValueError("futures-market-snapshot requires an IB connection")
+    if args.ib_history_prior_years <= 0:
+        raise ValueError("--ib-history-prior-years must be positive")
+    if args.ib_history_db is not None and not snapshot_only:
+        raise ValueError(
+            "--ib-history-db universe import is available only in "
+            "futures-market-snapshot mode"
+        )
     live_acquisition = snapshot_only or (
         args.snapshot_input is None and not args.offline
     )
@@ -5530,6 +5681,7 @@ def run(
             instruments,
             pysystemtrade_provider=pysystemtrade_provider,
             reference_fx_by_currency=reference_fx_by_currency,
+            update_ib_history=True,
         )
         return _emit_market_snapshot(rows, args)
 
