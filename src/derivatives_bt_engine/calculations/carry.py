@@ -181,10 +181,19 @@ def build_raw_carry_frame(
 
     ``carry_frame`` must contain same-timestamp current and carry prices and
     contract IDs. ``point_vol_frame`` supplies daily point volatility under
-    ``point_vol_column``.  The result retains every observed carry row and
-    adds reproducible inputs, a validity flag, and an explicit exclusion
-    reason.  Zero price differentials are invalid, matching pysystemtrade's
-    conversion of zero raw roll to missing.
+    ``point_vol_column``. By default that is the mixed estimator built from
+    roll-neutral Panama point changes: a 32-session fast EWM standard
+    deviation blended 70/30 with a 10-year EWM average of the fast volatility.
+    This function annualizes that daily point volatility using
+    ``sqrt(annualization_days)`` (normally ``sqrt(256)``). The result retains
+    every observed carry row and adds reproducible inputs, a validity flag,
+    and an explicit exclusion reason.
+    The signed price slope is ``current_price - carry_price`` over the signed
+    contract-year gap ``carry_contract - current_contract``. This is distinct
+    from the Panama roll adjustment, which is normally ``forward - price`` at
+    a contract switch and therefore has the opposite sign for the same pair.
+    Zero price differentials are invalid, matching pysystemtrade's conversion
+    of zero raw roll to missing.
     """
     _validate_daily_frame(
         carry_frame,
@@ -226,9 +235,17 @@ def build_raw_carry_frame(
             (pl.col("current_price") - pl.col("carry_price")).alias("raw_roll"),
         )
         .with_columns(
+            # Keep the contract gap signed. If the two legs are swapped, both
+            # price and time differences reverse, leaving the curve slope
+            # unchanged; an unexpected negative gap can instead expose
+            # mismatched/reversed contract IDs in the source row.
             (pl.col("carry_con_yr") - pl.col("current_con_yr")).alias(
                 "con_yr_frac"
             ),
+            # mixed_point_vol is daily point volatility from the roll-neutral
+            # Panama point-change stream. Annualize it in the same price-point
+            # units as raw_roll; contract marks are joined for execution checks
+            # elsewhere and are not the volatility input.
             (
                 pl.col(point_vol_column).cast(pl.Float64)
                 * math.sqrt(annualization_days)
@@ -323,7 +340,11 @@ def build_carry_components(
     Smoothing uses ``span=N, adjust=True`` for the AFTS Carry5/20/60/120
     business-day variants. Every component uses the same fixed scalar; on
     this project's normalized forecast convention Carver's scalar 30 is
-    ``3.0``. The final FDM comes from the AFTS final-rule-count table.
+    ``3.0``. Each scaled component is capped at +/-2, then components receive
+    equal weights. One AFTS final-rule-count FDM is applied to that weighted
+    average, followed by the portfolio forecast cap. In trend/carry mode the
+    caller uses these component forecasts and applies a single FDM across the
+    full EWMAC-plus-carry rule set instead of using this carry-only FDM.
     """
     _validate_daily_frame(
         raw_carry_frame,
@@ -360,6 +381,7 @@ def build_carry_components(
         ).with_columns(
             pl.when(pl.col("carry_valid"))
             .then(
+                # Scalar and per-rule cap apply before equal weighting and FDM.
                 (pl.col(smooth_column) * forecast_scalar).clip(
                     -forecast_cap,
                     forecast_cap,
@@ -384,6 +406,8 @@ def build_carry_components(
     )
     frame = frame.with_columns(component_valid.alias("forecast_valid")).with_columns(
         pl.when(pl.col("forecast_valid"))
+        # FDM diversifies the weighted rule combination; it is not a separate
+        # multiplier embedded in each smoothed speed. Cap again after FDM.
         .then((weighted * fdm).clip(-forecast_cap, forecast_cap))
         .otherwise(None)
         .alias("combined_forecast")
@@ -435,6 +459,9 @@ def build_carry_forecast(
     if not 0 < min_post_warmup_coverage <= 1:
         raise ValueError("min_post_warmup_coverage must be in (0, 1]")
     execution = _history_execution_frame(history)
+    # The daily mixed volatility was estimated from Panama point changes. Keep
+    # mark_contract beside it to verify that a persisted carry forecast still
+    # belongs to the contract being marked; it does not define that volatility.
     mark_contracts = history.marks.select(
         "date",
         pl.col("contract_id").alias("mark_contract"),
@@ -558,7 +585,9 @@ def combine_trend_and_carry_forecasts(
     60% to the caller's EWMAC rule weights and 40% equally across carry rules,
     then applies one AFTS FDM based on the total final component count.  This
     avoids double-counting the carry-only and trend-only diversification
-    multipliers.
+    multipliers. The carry components entering this blend already have their
+    scalar and per-component cap, but their carry-only combined forecast/FDM is
+    deliberately not used here.
     """
     if trend_weight < 0 or carry_weight < 0 or not math.isclose(
         trend_weight + carry_weight,
