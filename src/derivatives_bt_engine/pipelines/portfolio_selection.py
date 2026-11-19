@@ -4721,7 +4721,7 @@ def _run_complete_selection(
             # cache even when a return signal drives the actual backtest.
             "elig_ewmac_rules": str(row.get("elig_ewmac_rules") or ""),
             "elig_carry_rules": str(row.get("elig_carry_rules") or ""),
-            "forecast_weights": json.dumps(forecast_weights, sort_keys=True),
+            "forecast_weights": forecast_weights,
             "fdm": forecast_fdm,
             "carry_turnover_estimates": (
                 json.dumps(carry_turnover_estimates, sort_keys=True)
@@ -4778,6 +4778,11 @@ def _run_complete_selection(
             **forecast_activity,
             **forecast_audit,
         }
+        # A recombined carry cache can supply its own weights. Serialize the
+        # merged value so every report row has the same type across rule sets.
+        audit["forecast_weights"] = json.dumps(
+            audit["forecast_weights"], sort_keys=True
+        )
         audit_rows.append(audit)
         # Keep only a lazy scan after the versioned curve is present on disk.
         # Later stages push their projections into the Parquet reader, and a
