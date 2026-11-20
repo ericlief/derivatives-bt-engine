@@ -1519,9 +1519,9 @@ def parse_args(argv=None, *, complete_default: bool = False):
         type=Path,
         help=(
             "Optional stored IB dated-contract database. When supplied, the "
-            "cash P&L and scheduled-selection inputs use offline stitched "
-            "reference/IB history with reference data retained before the "
-            "IB handoff."
+            "cash P&L, scheduled-selection inputs, and EWMAC/carry daily "
+            "forecast report use offline stitched reference/IB history "
+            "with reference data retained before the IB handoff."
         ),
     )
     parser.add_argument(
@@ -2426,6 +2426,26 @@ def _label_forecast_output_frame(
     leading = ["date", "symbol", "hist_instr_code"]
     trailing = [column for column in columns if column not in leading]
     return labeled.select(leading + trailing)
+
+
+def _stitch_forecast_output_frame(
+    ref_forecasts: pl.LazyFrame,
+    ib_forecasts: pl.LazyFrame,
+    *,
+    live_tail_start: date,
+) -> pl.LazyFrame:
+    """Join daily forecast diagnostics at the executable PST-to-IB handoff."""
+    return pl.concat(
+        [
+            ref_forecasts.filter(pl.col("date") < live_tail_start).with_columns(
+                pl.lit("pysystemtrade").alias("source_segment")
+            ),
+            ib_forecasts.filter(pl.col("date") >= live_tail_start).with_columns(
+                pl.lit("ib").alias("source_segment")
+            ),
+        ],
+        how="diagonal_relaxed",
+    )
 
 
 def _lazy_frame(frame: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
@@ -3967,9 +3987,9 @@ def _run_complete_selection(
     )
 
     audit_rows: list[dict[str, object]] = []
-    # Long-form output copies: one symbol-labelled frame is appended here and
-    # all are concatenated only when the daily forecast Parquet is written.
-    forecast_output_frames: list[pl.LazyFrame] = []
+    # Keep one lazy forecast scan per executable symbol until the stitched
+    # replay identifies which symbols have an IB tail to report.
+    forecast_output_frames: dict[str, pl.LazyFrame] = {}
     # Executable symbol -> combined forecast, equal-weight reference position,
     # FX, and net-return history.
     # MZC and CORN_mini can point to the same raw history but remain separate
@@ -4811,12 +4831,15 @@ def _run_complete_selection(
         reference_base_frames[symbol] = reference_base_scan
         reference_cache_keys[symbol] = reference_cache_key
         reference_base_cache_keys[symbol] = reference_base_cache_key
-        forecast_output_frames.append(
-            _label_forecast_output_frame(
-                reference_scan,
-                symbol=symbol,
-                hist_instr_code=str(row["hist_instr_code"]),
+        forecast_report_scan = reference_scan
+        if args.signal_model == EWMAC_CARRY_MODEL:
+            forecast_report_scan = forecast_report_scan.with_columns(
+                pl.lit("pysystemtrade").alias("source_segment")
             )
+        forecast_output_frames[symbol] = _label_forecast_output_frame(
+            forecast_report_scan,
+            symbol=symbol,
+            hist_instr_code=str(row["hist_instr_code"]),
         )
         if args.signal_model in (CARRY_MODEL, EWMAC_CARRY_MODEL):
             # The static forecast now owns the expensive calculation state on
@@ -4884,30 +4907,8 @@ def _run_complete_selection(
             "no instrument has sufficient pairwise subsystem-reference returns"
         )
 
-    forecast_panel = pl.concat(forecast_output_frames, how="diagonal_relaxed")
-    if args.selection_report_mode == "compact":
-        compact_columns = (
-            "date", "symbol", "hist_instr_code", "comb_fcst", "fcst_valid",
-            "forecast_fdm", "trend_fdm", "carry_fdm", "carry_forecast_scalar",
-            "trend_family_forecast", "carry_family_forecast",
-            "trend_forecast_valid", "carry_forecast_valid",
-            "trend_family_weight", "carry_family_weight", "carry_obs_date",
-            "carry_forecast_obs_date", "carry_stale_days", "trend_forecast_missing",
-            "carry_excl", "ref_tgt_pos", "ref_held_pos", "ref_return_valid",
-            "ref_net_pct", "source_segment", "pt_change", "close",
-            "pt_vol", "point_change", "point_vol",
-        )
-        available = set(forecast_panel.collect_schema().names())
-        forecast_panel = forecast_panel.select(
-            [name for name in compact_columns if name in available]
-        )
-    public_forecasts = round_public_report(
-        rename_public_report_columns(forecast_panel.collect(engine="streaming"))
-    )
-    public_forecasts.write_parquet(forecasts_path)
     reference_return_wide.write_parquet(reference_return_path)
-    del forecast_panel, public_forecasts
-    del forecast_output_frames, reference_return_wide
+    del reference_return_wide
     gc.collect()
 
     audit_by_symbol = {
@@ -5615,6 +5616,7 @@ def _run_complete_selection(
                                 },
                             }
                             if args.signal_model == EWMAC_CARRY_MODEL:
+                                stitched_identity["forecast_report_schema"] = 2
                                 stitched_identity["trend_carry_blend"] = {
                                     "weight_policy": "available_rules",
                                     "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
@@ -5662,6 +5664,7 @@ def _run_complete_selection(
                                     stitched_component = build_ewmac_component_frame(
                                         stitched_history,
                                         pooled_rules,
+                                        detailed=args.signal_model == EWMAC_CARRY_MODEL,
                                     )
                             if args.signal_model == RETURN_TSMOM_MODEL:
                                 assert return_tsmom_scalar_history is not None
@@ -5809,12 +5812,27 @@ def _run_complete_selection(
                         # Reuse the stable cost-free PST prefix and append only
                         # the mutable stitched tail. Forecast calculation used
                         # the full history above so EWMAC state is continuous.
+                        stitched_tail_scan = pl.scan_parquet(
+                            stitched_reference_path
+                        )
+                        if args.signal_model == EWMAC_CARRY_MODEL:
+                            forecast_output_frames[symbol] = (
+                                _stitch_forecast_output_frame(
+                                    forecast_output_frames[symbol],
+                                    _label_forecast_output_frame(
+                                        stitched_tail_scan,
+                                        symbol=symbol,
+                                        hist_instr_code=history_code,
+                                    ),
+                                    live_tail_start=live_tail_start,
+                                )
+                            )
                         cash_reference_frames[symbol] = pl.concat(
                             [
                                 reference_base_frames[symbol].filter(
                                     pl.col("date") < live_tail_start
                                 ),
-                                pl.scan_parquet(stitched_reference_path),
+                                stitched_tail_scan,
                             ],
                             how="diagonal_relaxed",
                         )
@@ -5853,6 +5871,32 @@ def _run_complete_selection(
             symbol: str(source_rows[symbol]["hist_instr_code"])
             for symbol in cash_symbols
         }
+
+    forecast_panel = pl.concat(
+        list(forecast_output_frames.values()), how="diagonal_relaxed"
+    )
+    if args.selection_report_mode == "compact":
+        compact_columns = (
+            "date", "symbol", "hist_instr_code", "comb_fcst", "fcst_valid",
+            "forecast_fdm", "trend_fdm", "carry_fdm", "carry_forecast_scalar",
+            "trend_family_forecast", "carry_family_forecast",
+            "trend_forecast_valid", "carry_forecast_valid",
+            "trend_family_weight", "carry_family_weight", "carry_obs_date",
+            "carry_forecast_obs_date", "carry_stale_days", "trend_forecast_missing",
+            "carry_excl", "ref_tgt_pos", "ref_held_pos", "ref_return_valid",
+            "ref_net_pct", "source_segment", "pt_change", "close",
+            "pt_vol", "point_change", "point_vol",
+        )
+        available = set(forecast_panel.collect_schema().names())
+        forecast_panel = forecast_panel.select(
+            [name for name in compact_columns if name in available]
+        )
+    public_forecasts = round_public_report(
+        rename_public_report_columns(forecast_panel.collect(engine="streaming"))
+    )
+    public_forecasts.write_parquet(forecasts_path)
+    del forecast_panel, forecast_output_frames, public_forecasts
+    gc.collect()
 
     walk_forward_reference_frames = (
         {

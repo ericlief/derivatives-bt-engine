@@ -1647,8 +1647,13 @@ configured rules.
 `carry_scalar` converts the smoothed input to forecast units before the
 per-rule cap. `wt_fcst_*` gives the effective daily weight of each component. `trend_fdm` and `carry_fdm` apply to their respective family
 forecast columns. `comb_fdm` applies to the final weighted component sum.
-The combined selection panel uses the reference history; the stitched cash
-P&L report tracks the executable replay, including an IB tail where available.
+The EWMAC/carry daily forecast Parquet keeps the PST prefix and appends the
+same snapshot-bounded IB tail used by the cash replay where available.
+`source_segment` identifies the source on each row. Full mode includes raw
+EWMAC forecasts and scalars, raw carry, and the component forecasts, weights,
+and FDMs on both segments. The IB tail's reference P&L fields reflect the
+cost-free series used before executable sizing and charges. The separate
+synchronized subsystem reference returns still describe the correlation input.
 
 `--compact` is shorthand for `--selection-report-mode compact`. It writes the
 same report types, with a narrower daily forecast panel and scheduled trial

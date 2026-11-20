@@ -18,6 +18,7 @@ from derivatives_bt_engine.pipelines.portfolio_selection import (
     _selection_history_content_identity,
     _selection_pysystemtrade_identity,
     _selection_rebalance_dates,
+    _stitch_forecast_output_frame,
     _reference_return_coverage,
     _subsystem_reference_correlation,
     _WalkForwardSelectionProvider,
@@ -226,6 +227,33 @@ def test_forecast_output_places_symbol_immediately_after_date():
         "point_vol",
         "combined_forecast",
     ]
+
+
+def test_forecast_export_keeps_raw_ib_components_at_handoff(tmp_path):
+    """The same Parquet keeps raw diagnostics from both sides of the handoff."""
+    prefix = pl.LazyFrame({
+        "date": [date(2024, 3, 28), date(2024, 4, 1)],
+        "raw_fcst_8_32": [0.2, 9.0],
+        "raw_carry": [0.3, 9.0],
+        "comb_fcst": [0.4, 9.0],
+    })
+    tail = pl.LazyFrame({
+        "date": [date(2024, 3, 28), date(2024, 4, 1), date(2024, 4, 2)],
+        "raw_fcst_8_32": [8.0, -0.2, -0.3],
+        "raw_carry": [8.0, 0.5, None],
+        "comb_fcst": [8.0, 0.1, 0.2],
+    })
+    path = tmp_path / "forecasts.parquet"
+    _stitch_forecast_output_frame(
+        prefix, tail, live_tail_start=date(2024, 4, 1)
+    ).sink_parquet(path)
+
+    report = pl.read_parquet(path)
+    assert report["date"].n_unique() == report.height == 3
+    assert report["source_segment"].to_list() == ["pysystemtrade", "ib", "ib"]
+    assert report["raw_fcst_8_32"].to_list() == [0.2, -0.2, -0.3]
+    assert report["raw_carry"].to_list() == [0.3, 0.5, None]
+    assert report["comb_fcst"].to_list() == [0.4, 0.1, 0.2]
 
 
 def test_slow_tilt_ewmac_weights_use_sixty_forty_full_template():
