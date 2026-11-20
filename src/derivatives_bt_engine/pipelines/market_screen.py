@@ -157,6 +157,7 @@ DEFAULT_COST_EWMAC_FAST_SPANS = (4, 8, 16, 32, 64)
 DEFAULT_COST_EWMAC_FAST_SPAN = 16
 DEFAULT_COST_EWMAC_SLOW_SPAN = 64
 DEFAULT_COST_EWMAC_VOL_SPAN = MIXED_VOL_FAST_SPAN
+_CARRY_TURNOVER_MAX_GAP_DAYS = 7
 DEFAULT_RULE_COST_LIMIT_SR = 0.15
 DEFAULT_AFFORDABILITY_TARGET_VOL = 0.20
 DEFAULT_AFFORDABILITY_MIN_CONTRACTS = 4
@@ -1002,7 +1003,7 @@ def _carry_rule_turnover(
     cache calculation after accounting for the different forecast scale.
     """
     forecast_column = f"fcst_carry_{smooth_span}"
-    required = {"date", "carry_segment", "forecast_valid", forecast_column}
+    required = {"date", "forecast_valid", forecast_column}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(
@@ -1014,17 +1015,28 @@ def _carry_rule_turnover(
         & pl.col(forecast_column).is_not_null()
         & pl.col(forecast_column).is_finite()
     )
-    # Only adjacent valid observations owned by the same smoothing segment
-    # represent a daily forecast change. Filtering first would bridge source
-    # handoffs, invalid rows, or long gaps and overstate turnover.
+    # Use the curve observation's date and provider when carry was joined
+    # onto an execution series. Adjacent valid forecasts within a provider
+    # count as daily changes even though the EWMA state spans the handoff.
+    observation_date = (
+        "carry_obs_date" if "carry_obs_date" in ordered.columns else "date"
+    )
+    adjacent = (
+        pl.col(observation_date).diff().dt.total_days()
+        <= _CARRY_TURNOVER_MAX_GAP_DAYS
+    )
+    source_column = (
+        "source_segment_right"
+        if "source_segment_right" in ordered.columns
+        else "source_segment"
+    )
+    if source_column in ordered.columns:
+        adjacent &= pl.col(source_column) == pl.col(source_column).shift(1)
     changes = ordered.select(
         pl.when(
             forecast_valid
-            & forecast_valid.shift(1).fill_null(False)
-            & (
-                pl.col("carry_segment")
-                == pl.col("carry_segment").shift(1)
-            ).fill_null(False)
+            & forecast_valid.shift(1)
+            & adjacent
         )
         .then(pl.col(forecast_column).diff().abs())
         .otherwise(None)

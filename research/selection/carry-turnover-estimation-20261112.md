@@ -4,6 +4,21 @@
 
 **Status:** re-audited and corrected in code; rule-cache rebuild required
 
+## Continuous EWMA
+
+Carry forecast cache version 3 uses a continuous, null-skipping EWMA for
+each speed. An excluded carry row leaves the forecast missing and the next
+valid row resumes the same EWMA. State also persists across provider handoffs
+and long calendar gaps. The seven-day limit on reusing a forecast for
+execution still applies.
+
+The pooled turnover estimate still uses adjacent valid observations from
+the same provider and skips gaps longer than seven calendar days. Rebuild
+with `futures-rule-cache` against the existing market snapshot before running
+carry or trend/carry selection. Those models require the new
+`pooled_pst_history_afts_span_continuous_v3` calibration. The estimates below
+document the prior version.
+
 ## Decision
 
 Carry-rule affordability now uses turnover estimated from the reviewed

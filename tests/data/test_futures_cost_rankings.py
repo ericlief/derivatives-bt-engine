@@ -313,17 +313,17 @@ def test_carry_selection_uses_pooled_turnover_instead_of_ewmac_rules():
 
 
 def test_carry_selection_rejects_old_turnover_estimator_cache():
-    """COM-based turnover caches cannot silently feed the span rules."""
+    """Segmented turnover caches cannot feed the continuous carry rules."""
     report = _phase2_step1_report().with_columns(
         [
-            pl.lit("pooled_pst_history").alias(
+            pl.lit("pooled_pst_history_afts_span_segment_safe_v2").alias(
                 f"pool_carry_{smooth}_turn_src"
             )
             for smooth in (5, 20, 60, 120)
         ]
     )
 
-    with pytest.raises(ValueError, match="AFTS-span, segment-safe"):
+    with pytest.raises(ValueError, match="continuous AFTS-span"):
         selection_rebalance_candidates(report, signal_model="carry")
 
 

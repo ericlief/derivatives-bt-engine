@@ -34,8 +34,8 @@ def test_carry_rule_smooths_parse_afts_family_in_stable_order():
         _carry_rule_smooths("carry10")
 
 
-def test_carry_forecast_cache_identity_uses_span_semantics(tmp_path):
-    """The v2 identity cannot match an old COM-based forecast artifact."""
+def test_carry_forecast_cache_identity_uses_continuous_smoothing(tmp_path):
+    """The v3 identity distinguishes continuous and segmented forecasts."""
     _, _, identity, _ = _carry_forecast_cache_spec(
         tmp_path,
         artifact="carry_reference_forecast",
@@ -45,9 +45,11 @@ def test_carry_forecast_cache_identity_uses_span_semantics(tmp_path):
         min_valid_observations=256,
     )
 
-    assert CARRY_FORECAST_CACHE_VERSION == 2
+    assert CARRY_FORECAST_CACHE_VERSION == 3
+    assert identity["forecast_cache_version"] == CARRY_FORECAST_CACHE_VERSION
     assert identity["carry_smooth_spans"] == [5, 20, 60, 120]
     assert "carry_smooth_coms" not in identity
+    assert "max_smoothing_gap_days" not in identity
 
 
 def test_reference_return_coverage_uses_only_valid_forecast_rows():

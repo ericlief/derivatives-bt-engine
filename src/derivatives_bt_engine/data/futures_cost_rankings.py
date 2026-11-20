@@ -420,7 +420,7 @@ def resolve_selection_config(
 
 
 def _validate_carry_turnover_cache(report: pl.DataFrame) -> None:
-    """Reject missing or pre-v2 carry turnover calibration inputs."""
+    """Require pooled turnover calibrated with the current carry smoother."""
     required_turnover = {
         f"pool_carry_{smooth}_ann_trades" for smooth in CARRY_SMOOTH_SPANS
     }
@@ -443,7 +443,7 @@ def _validate_carry_turnover_cache(report: pl.DataFrame) -> None:
         for sources in sources_by_column.values()
     ):
         raise ValueError(
-            "carry selection requires AFTS-span, segment-safe pooled "
+            "carry selection requires continuous AFTS-span pooled "
             f"turnover source {CARRY_TURNOVER_SOURCE!r}; found "
             f"{sources_by_column}. Rebuild the input with futures-rule-cache"
         )

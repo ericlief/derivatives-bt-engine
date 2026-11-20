@@ -114,7 +114,6 @@ from derivatives_bt_engine.calculations.carry import (
     CARRY_FORECAST_CAP,
     CARRY_FORECAST_SCALAR,
     EWMAC_CARRY_MODEL,
-    CARRY_MAX_SMOOTHING_GAP_DAYS,
     CARRY_MAX_STALE_DAYS,
     CARRY_MIN_POST_WARMUP_COVERAGE,
     CARRY_MODEL,
@@ -205,7 +204,7 @@ SELECTION_BACKTEST_CACHE_VERSION = 3
 CASH_PNL_CACHE_VERSION = 3
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
-CARRY_FORECAST_CACHE_VERSION = 2
+CARRY_FORECAST_CACHE_VERSION = 3
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -845,7 +844,6 @@ def _carry_forecast_cache_spec(
         "carry_smooth_spans": rules,
         "forecast_scalar": CARRY_FORECAST_SCALAR,
         "forecast_cap": CARRY_FORECAST_CAP,
-        "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
         "max_stale_days": CARRY_MAX_STALE_DAYS,
         "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
         "min_valid_observations": min_valid_observations,
@@ -1054,6 +1052,7 @@ def _cached_stitched_carry_forecast_spec(
         )
         if (
             identity.get("signal_model") != CARRY_MODEL
+            or identity.get("forecast_cache_version") != CARRY_FORECAST_CACHE_VERSION
             or not set(rules).issubset(available_rules)
             or identity.get("min_valid_observations") != min_valid_observations
             or not {"pysystemtrade", "ib"}.issubset(
@@ -4236,7 +4235,7 @@ def _run_complete_selection(
                 "smooth_spans": carry_smooths,
                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                 "forecast_cap": CARRY_FORECAST_CAP,
-                "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+                "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
                 "max_stale_days": CARRY_MAX_STALE_DAYS,
                 "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
                 "turnover_estimates": carry_turnover_estimates,
@@ -4287,7 +4286,7 @@ def _run_complete_selection(
                 "smooth_spans": carry_smooths,
                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                 "forecast_cap": CARRY_FORECAST_CAP,
-                "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+                "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
                 "max_stale_days": CARRY_MAX_STALE_DAYS,
                 "min_post_warmup_coverage": (
                     CARRY_MIN_POST_WARMUP_COVERAGE
@@ -5572,8 +5571,8 @@ def _run_complete_selection(
                                 "smooth_spans": carry_smooths,
                                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                                 "forecast_cap": CARRY_FORECAST_CAP,
-                                "max_smoothing_gap_days": (
-                                    CARRY_MAX_SMOOTHING_GAP_DAYS
+                                "forecast_cache_version": (
+                                    CARRY_FORECAST_CACHE_VERSION
                                 ),
                                 "max_stale_days": CARRY_MAX_STALE_DAYS,
                                 "min_post_warmup_coverage": (
@@ -5948,7 +5947,7 @@ def _run_complete_selection(
             "available_smooth_spans": CARRY_SMOOTH_SPANS,
             "forecast_scalar": CARRY_FORECAST_SCALAR,
             "forecast_cap": CARRY_FORECAST_CAP,
-            "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+            "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
             "max_stale_days": CARRY_MAX_STALE_DAYS,
             "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
             "turnover_source": CARRY_TURNOVER_SOURCE,
@@ -5961,7 +5960,7 @@ def _run_complete_selection(
             "available_smooth_spans": CARRY_SMOOTH_SPANS,
             "forecast_scalar": CARRY_FORECAST_SCALAR,
             "forecast_cap": CARRY_FORECAST_CAP,
-            "max_smoothing_gap_days": CARRY_MAX_SMOOTHING_GAP_DAYS,
+            "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
             "max_stale_days": CARRY_MAX_STALE_DAYS,
             "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
             "turnover_source": CARRY_TURNOVER_SOURCE,

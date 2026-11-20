@@ -97,20 +97,30 @@ def test_carry_span_smoothing_matches_polars_and_uses_normalized_scalar() -> Non
     assert result.fdm == pytest.approx(1.23)
 
 
-def test_carry_smoothing_restarts_at_source_handoff() -> None:
+def test_carry_smoothing_keeps_state_across_nulls_handoff_and_gap() -> None:
+    """All four speeds retain history and emit null targets on missing rows."""
     raw = pl.DataFrame(
         {
-            "date": _dates(4),
-            "raw_carry": [1.0, 1.0, -1.0, -1.0],
-            "carry_valid": [True] * 4,
-            "source_segment": ["ref", "ref", "ib", "ib"],
+            "date": [*_dates(4), date(2024, 1, 20)],
+            "raw_carry": [0.1, None, None, -0.1, 0.2],
+            "carry_valid": [True, False, False, True, True],
+            "source_segment": ["pysystemtrade", "pysystemtrade", "ib", "ib", "ib"],
         }
     )
 
-    result = build_carry_components(raw, smooth_spans=(5,))
+    result = build_carry_components(raw)
 
-    assert result.frame["carry_segment"].to_list() == [1, 1, 2, 2]
-    assert result.frame["smooth_carry_5"][2] == pytest.approx(-1.0)
+    assert result.frame["forecast_valid"].to_list() == [True, False, False, True, True]
+    assert result.frame["combined_forecast"][1:3].null_count() == 2
+    for span in (5, 20, 60, 120):
+        decay = 1 - 2 / (span + 1)
+        smooth = result.frame[f"smooth_carry_{span}"]
+        assert smooth[1:3].null_count() == 2
+        assert result.frame[f"fcst_carry_{span}"][1:3].null_count() == 2
+        assert smooth[3] == pytest.approx((0.1 * decay - 0.1) / (1 + decay))
+        assert smooth[4] == pytest.approx(
+            (0.1 * decay**2 - 0.1 * decay + 0.2) / (1 + decay + decay**2)
+        )
 
 
 @pytest.mark.parametrize(

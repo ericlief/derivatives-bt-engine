@@ -8,9 +8,9 @@ Carver scale.  It also provides the AFTS final-rule-count diversification
 table and the default 60/40 trend/carry combination used by strategy eleven.
 
 No function joins carry legs from different dates or fills beyond the bounded
-staleness policy. Smoothing restarts at source changes, invalid observations,
-and long calendar gaps so an unexplained stitch gap cannot silently become
-history for the next provider segment.
+staleness policy. The EWMA uses each instrument's continuous observation
+history, skipping null raw carry while preserving the state for the next
+valid observation.
 """
 
 from __future__ import annotations
@@ -46,10 +46,9 @@ EWMAC_CARRY_MODEL = "ewmac_carry"
 CARRY_SMOOTH_SPANS = (5, 20, 60, 120)
 CARRY_FORECAST_SCALAR = 3.0
 CARRY_FORECAST_CAP = 2.0
-CARRY_MAX_SMOOTHING_GAP_DAYS = 7
 CARRY_MAX_STALE_DAYS = 7
 CARRY_MIN_POST_WARMUP_COVERAGE = 0.90
-CARRY_TURNOVER_SOURCE = "pooled_pst_history_afts_span_segment_safe_v2"
+CARRY_TURNOVER_SOURCE = "pooled_pst_history_afts_span_continuous_v3"
 DEFAULT_TREND_FAMILY_WEIGHT = 0.60
 DEFAULT_CARRY_FAMILY_WEIGHT = 0.40
 
@@ -309,38 +308,21 @@ def build_raw_carry_frame(
     )
 
 
-def _carry_segment_expression(max_gap_days: int, has_source: bool) -> pl.Expr:
-    """Return a cumulative segment ID for safe carry EWMA ownership."""
-    gap_break = (
-        pl.col("date").diff().dt.total_days().gt(max_gap_days).fill_null(True)
-    )
-    invalid_break = (
-        (~pl.col("carry_valid"))
-        | (~pl.col("carry_valid").shift(1).fill_null(False))
-    )
-    source_break = (
-        (pl.col("source_segment") != pl.col("source_segment").shift(1))
-        .fill_null(True)
-        if has_source
-        else pl.lit(False)
-    )
-    return (gap_break | invalid_break | source_break).cast(pl.UInt32).cum_sum()
-
-
 def build_carry_components(
     raw_carry_frame: pl.DataFrame,
     *,
     smooth_spans: Iterable[int] = CARRY_SMOOTH_SPANS,
     forecast_scalar: float = CARRY_FORECAST_SCALAR,
     forecast_cap: float = CARRY_FORECAST_CAP,
-    max_gap_days: int = CARRY_MAX_SMOOTHING_GAP_DAYS,
 ) -> CombinedForecastResult:
     """Smooth, scale, equally weight, and diversify carry forecasts.
 
-    Smoothing uses ``span=N, adjust=True`` for the AFTS Carry5/20/60/120
-    business-day variants. Every component uses the same fixed scalar; on
-    this project's normalized forecast convention Carver's scalar 30 is
-    ``3.0``. Each scaled component is capped at +/-2, then components receive
+    Smoothing uses ``span=N, adjust=True, ignore_nulls=True`` for the AFTS
+    Carry5/20/60/120 variants. Missing observations take no weight and
+    leave that day's forecast null. History carries through provider
+    handoffs and calendar gaps. Every component uses a fixed scalar of
+    ``3.0`` for Carver's 30 on this project's normalized forecast scale.
+    Each scaled component is capped at +/-2, then components receive
     equal weights. One AFTS final-rule-count FDM is applied to that weighted
     average, followed by the portfolio forecast cap. In trend/carry mode the
     caller uses these component forecasts and applies a single FDM across the
@@ -360,23 +342,20 @@ def build_carry_components(
         raise ValueError("forecast_scalar must be finite and positive")
     if not math.isfinite(forecast_cap) or forecast_cap <= 0:
         raise ValueError("forecast_cap must be finite and positive")
-    if max_gap_days < 1:
-        raise ValueError("max_gap_days must be positive")
 
-    frame = raw_carry_frame.sort("date").with_columns(
-        _carry_segment_expression(
-            max_gap_days,
-            "source_segment" in raw_carry_frame.columns,
-        ).alias("carry_segment")
-    )
+    frame = raw_carry_frame.sort("date")
+    valid_raw_carry = pl.when(pl.col("carry_valid")).then(pl.col("raw_carry"))
     component_columns: list[str] = []
     for smooth_span in rules:
         smooth_column = f"smooth_carry_{smooth_span}"
         forecast_column = f"fcst_carry_{smooth_span}"
         frame = frame.with_columns(
-            pl.col("raw_carry")
-            .ewm_mean(span=smooth_span, adjust=True, min_samples=1)
-            .over("carry_segment")
+            valid_raw_carry.ewm_mean(
+                span=smooth_span,
+                adjust=True,
+                ignore_nulls=True,
+                min_samples=1,
+            )
             .alias(smooth_column)
         ).with_columns(
             pl.when(pl.col("carry_valid"))
@@ -422,8 +401,6 @@ def build_carry_components(
         "carry_smooth_spans": rules,
         "carry_forecast_scalar": forecast_scalar,
         "carry_forecast_cap": forecast_cap,
-        "carry_max_gap_days": max_gap_days,
-        "carry_segment_n": frame.get_column("carry_segment").n_unique(),
         "combined_nulls": frame.get_column("combined_forecast").null_count(),
         "combined_nonfinite": frame.filter(
             pl.col("combined_forecast").is_not_null()
@@ -439,7 +416,6 @@ def build_carry_forecast(
     smooth_spans: Iterable[int] = CARRY_SMOOTH_SPANS,
     forecast_scalar: float = CARRY_FORECAST_SCALAR,
     forecast_cap: float = CARRY_FORECAST_CAP,
-    max_gap_days: int = CARRY_MAX_SMOOTHING_GAP_DAYS,
     max_stale_days: int = CARRY_MAX_STALE_DAYS,
     min_post_warmup_coverage: float = CARRY_MIN_POST_WARMUP_COVERAGE,
     min_valid_observations: int = 256,
@@ -476,7 +452,6 @@ def build_carry_forecast(
         smooth_spans=smooth_spans,
         forecast_scalar=forecast_scalar,
         forecast_cap=forecast_cap,
-        max_gap_days=max_gap_days,
     )
     carry_owned = components.frame.drop("mixed_point_vol").rename(
         {
