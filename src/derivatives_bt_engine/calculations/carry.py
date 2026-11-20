@@ -7,10 +7,9 @@ and combines the resulting forecasts on the repository's divided-by-ten
 Carver scale.  It also provides the AFTS final-rule-count diversification
 table and the default 60/40 trend/carry combination used by strategy eleven.
 
-No function joins carry legs from different dates or fills beyond the bounded
-staleness policy. The EWMA uses each instrument's continuous observation
-history, skipping null raw carry while preserving the state for the next
-valid observation.
+The carry legs and volatility are matched on the same date. The EWMA skips
+null raw carry and retains its state. The forecast stage forward-fills the
+resulting scaled forecasts without filling raw curve observations.
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ EWMAC_CARRY_MODEL = "ewmac_carry"
 CARRY_SMOOTH_SPANS = (5, 20, 60, 120)
 CARRY_FORECAST_SCALAR = 3.0
 CARRY_FORECAST_CAP = 2.0
-CARRY_MAX_STALE_DAYS = 7
 CARRY_MIN_POST_WARMUP_COVERAGE = 0.90
 CARRY_TURNOVER_SOURCE = "pooled_pst_history_afts_span_continuous_v3"
 DEFAULT_TREND_FAMILY_WEIGHT = 0.60
@@ -422,28 +420,27 @@ def build_carry_forecast(
     smooth_spans: Iterable[int] = CARRY_SMOOTH_SPANS,
     forecast_scalar: float = CARRY_FORECAST_SCALAR,
     forecast_cap: float = CARRY_FORECAST_CAP,
-    max_stale_days: int = CARRY_MAX_STALE_DAYS,
+    turnover_max_stale_days: int | None = None,
     min_post_warmup_coverage: float = CARRY_MIN_POST_WARMUP_COVERAGE,
     min_valid_observations: int = 256,
 ) -> CombinedForecastResult:
     """Return a selection-compatible carry forecast for one futures history.
 
-    Carry is calculated only on observed same-session curve rows.  The most
-    recent forecast may persist for at most ``max_stale_days`` calendar days
-    when the executable current contract is unchanged.  The observation date
-    and staleness are retained, so this bounded PST-style persistence is
-    explicit rather than an unbounded or silent forward fill.
+    A same-session curve supplies a fresh forecast when its current contract
+    matches the mark. Forward-fill the resulting scaled rule forecasts on the
+    daily execution grid, including across rolls and long gaps. Keep raw curve
+    fields on their source date and report the age in calendar days of the
+    forecast used. Dates before the first valid forecast remain null.
+    ``turnover_max_stale_days`` preserves the historical observation alignment
+    used by rule-cost calibration when supplied, in calendar days.
     """
     if min_valid_observations < 2:
         raise ValueError("min_valid_observations must be at least 2")
-    if max_stale_days < 0:
-        raise ValueError("max_stale_days must not be negative")
     if not 0 < min_post_warmup_coverage <= 1:
         raise ValueError("min_post_warmup_coverage must be in (0, 1]")
     execution = _history_execution_frame(history)
-    # The daily mixed volatility was estimated from Panama point changes. Keep
-    # mark_contract beside it to verify that a persisted carry forecast still
-    # belongs to the contract being marked; it does not define that volatility.
+    # Verify the current leg of each new curve observation against the mark.
+    # A previously calculated forecast can still be used after the mark rolls.
     mark_contracts = history.marks.select(
         "date",
         pl.col("contract_id").alias("mark_contract"),
@@ -459,29 +456,44 @@ def build_carry_forecast(
         forecast_scalar=forecast_scalar,
         forecast_cap=forecast_cap,
     )
-    carry_owned = components.frame.drop("mixed_point_vol").rename(
-        {
-            "date": "carry_obs_date",
-            "forecast_valid": "carry_obs_valid",
-        }
+    carry_owned = components.frame.drop("mixed_point_vol").with_columns(
+        pl.col("date").alias("carry_obs_date"),
+    ).rename({"forecast_valid": "carry_obs_valid"})
+    forecast_columns = [
+        *(f"fcst_carry_{rule[5:]}" for rule in components.weights),
+        "combined_forecast",
+    ]
+    if turnover_max_stale_days is None:
+        frame = execution.join(carry_owned, on="date", how="left").sort("date")
+    else:
+        # Keep the rule-cache calibration on its original bounded sample.
+        frame = execution.join_asof(
+            carry_owned.drop("date").sort("carry_obs_date"),
+            left_on="date",
+            right_on="carry_obs_date",
+            strategy="backward",
+            tolerance=f"{turnover_max_stale_days}d",
+        )
+    mark_matches = (
+        pl.col("carry_obs_valid")
+        & (pl.col("mark_contract") == pl.col("current_contract"))
     )
-    # The tolerance makes forecast persistence auditable and bounded.  A
-    # current-contract equality check below prevents carrying a curve pair
-    # through an executable roll even inside the tolerance window.
-    frame = execution.join_asof(
-        carry_owned.sort("carry_obs_date"),
-        left_on="date",
-        right_on="carry_obs_date",
-        strategy="backward",
-        tolerance=f"{max_stale_days}d",
+    forecast_observation_date = pl.when(mark_matches).then(pl.col("carry_obs_date"))
+    if turnover_max_stale_days is None:
+        forecast_observation_date = forecast_observation_date.forward_fill()
+        frame = frame.with_columns(
+            pl.when(mark_matches).then(pl.col(column)).forward_fill().alias(column)
+            for column in forecast_columns
+        )
+    frame = frame.with_columns(
+        forecast_observation_date.alias("carry_forecast_obs_date"),
     ).with_columns(
-        (pl.col("date") - pl.col("carry_obs_date"))
+        (pl.col("date") - pl.col("carry_forecast_obs_date"))
         .dt.total_days()
         .alias("carry_stale_days")
     )
     execution_valid = (
-        pl.col("carry_obs_valid").fill_null(False)
-        & (pl.col("mark_contract") == pl.col("current_contract"))
+        pl.col("carry_forecast_obs_date").is_not_null()
         & pl.col("combined_forecast").is_not_null()
         & pl.col("combined_forecast").is_finite()
         & pl.col("point_vol").is_not_null()
@@ -524,7 +536,6 @@ def build_carry_forecast(
             "forecast_end": (
                 valid.get_column("date").max() if valid.height else None
             ),
-            "carry_max_stale_days": max_stale_days,
             "carry_stale_obs": valid.filter(
                 pl.col("carry_stale_days") > 0
             ).height,
@@ -609,7 +620,8 @@ def combine_trend_and_carry_forecasts(
     # The trend frame owns the daily marks. Label overlapping carry inputs
     # explicitly because they belong to the potentially older curve observation.
     carry_diagnostics = (
-        "carry_obs_date", "carry_stale_days", "carry_obs_valid",
+        "carry_obs_date", "carry_forecast_obs_date", "carry_stale_days",
+        "carry_obs_valid",
         "carry_price", "carry_contract",
         "current_con_yr", "carry_con_yr", "con_yr_frac", "ann_point_vol",
         "raw_roll", "ann_roll", "raw_carry", "carry_valid", "carry_excl",
@@ -655,6 +667,21 @@ def combine_trend_and_carry_forecasts(
             for rule, weight in carry.weights.items()
         },
     }
+    # As in the PST combiner, use the prior scaled rule forecast on missing
+    # dates. Carry has already been filled on the execution grid upstream.
+    frame = frame.sort("date").with_columns(
+        pl.any_horizontal(
+            pl.col(column).is_null() | ~pl.col(column).is_finite()
+            for column in trend_columns.values()
+        ).alias("trend_forecast_missing"),
+        *(
+            pl.when(pl.col(column).is_finite())
+            .then(pl.col(column))
+            .forward_fill()
+            .alias(column)
+            for column in trend_columns.values()
+        ),
+    )
     weighted_components = [
         pl.col(trend_columns[rule]) * final_weights[f"trend:{rule}"]
         for rule in trend.weights

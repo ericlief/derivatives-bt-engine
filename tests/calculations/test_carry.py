@@ -1,6 +1,7 @@
 """Tests for raw carry, smoothed forecasts, FDM, and trend/carry blending."""
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -10,6 +11,7 @@ from derivatives_bt_engine.calculations.carry import (
     CARRY_FORECAST_SCALAR,
     aft_final_rule_fdm,
     build_carry_components,
+    build_carry_forecast,
     build_raw_carry_frame,
     combine_trend_and_carry_forecasts,
     contract_year_fraction,
@@ -133,10 +135,57 @@ def test_aft_final_rule_fdm_uses_published_count_table(
     assert aft_final_rule_fdm(rule_count) == pytest.approx(fdm)
 
 
+def test_carry_forward_fills_forecasts_across_invalid_rows_and_roll(monkeypatch) -> None:
+    """Keep raw observations separate from forecast values carried forward."""
+    dates = [*_dates(3), date(2024, 1, 12), date(2024, 1, 15)]
+    execution = pl.DataFrame({
+        "date": dates,
+        "point_vol": [0.25] * 5,
+        "mixed_point_vol": [0.25] * 5,
+        "point_change": [0.1] * 5,
+    })
+    monkeypatch.setattr(
+        "derivatives_bt_engine.calculations.carry._history_execution_frame",
+        lambda history: execution,
+    )
+    history = SimpleNamespace(
+        marks=pl.DataFrame({
+            "date": dates,
+            "contract_id": ["20240300"] * 3 + ["20240600"] * 2,
+        }),
+        carry=pl.DataFrame({
+            "date": [dates[1], dates[2], dates[4]],
+            "current_contract": ["20240300", "20240300", "20240600"],
+            "carry_contract": ["20240600", "20240600", "20240900"],
+            "current_price": [100.1, 100.0, 99.9],
+            "carry_price": [100.0] * 3,
+        }),
+    )
+    forecast = build_carry_forecast(history, min_valid_observations=2).frame
+
+    assert forecast["carry_obs_date"].to_list() == [
+        None, dates[1], dates[2], None, dates[4],
+    ]
+    assert forecast["carry_forecast_obs_date"].to_list() == [
+        None, dates[1], dates[1], dates[1], dates[4],
+    ]
+    assert forecast["carry_stale_days"].to_list() == [None, 0, 1, 10, 0]
+    assert forecast["raw_carry"][2:4].null_count() == 2
+    assert forecast["fcst_carry_5"][0] is None
+    assert forecast["fcst_carry_5"][1:4].to_list() == pytest.approx([0.3] * 3)
+    assert forecast["fcst_carry_5"][4] < forecast["fcst_carry_5"][3]
+    assert forecast["forecast_valid"].to_list() == [False, True, True, True, True]
+
+    calibration = build_carry_forecast(
+        history, min_valid_observations=2, turnover_max_stale_days=7,
+    ).frame
+    assert calibration["forecast_valid"].to_list() == [False, True, False, False, True]
+
+
 def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
     dates = _dates(3)
     trend_columns = {
-        "fcst_4_16": [1.0] * 3,
+        "fcst_4_16": [1.0, None, 1.0],
         "fcst_8_32": [1.0] * 3,
         "fcst_16_64": [1.0] * 3,
         "fcst_32_128": [1.0] * 3,
@@ -211,6 +260,8 @@ def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
     )
     assert first["wt_fcst_4_16"] == pytest.approx(0.03)
     assert first["wt_fcst_carry_5"] == pytest.approx(0.10)
+    assert result.frame["trend_forecast_missing"].to_list() == [False, True, False]
+    assert result.frame["fcst_4_16"].to_list() == [1.0, 1.0, 1.0]
     assert result.frame["combined_forecast"].to_list() == pytest.approx(
         [0.268] * 3
     )

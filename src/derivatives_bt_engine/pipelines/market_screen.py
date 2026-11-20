@@ -1081,7 +1081,11 @@ def estimate_pooled_carry_cost_baselines(
     }
     for position, instrument_code in enumerate(instrument_codes, start=1):
         history = provider.load(instrument_code)
-        result = build_carry_forecast(history, smooth_spans=smooths)
+        result = build_carry_forecast(
+            history,
+            smooth_spans=smooths,
+            turnover_max_stale_days=_CARRY_TURNOVER_MAX_GAP_DAYS,
+        )
         roll_audit = _roll_rate_audit(
             history.marks,
             hold_roll_cycle=history.metadata.get("hold_roll_cycle"),

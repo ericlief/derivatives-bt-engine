@@ -114,7 +114,6 @@ from derivatives_bt_engine.calculations.carry import (
     CARRY_FORECAST_CAP,
     CARRY_FORECAST_SCALAR,
     EWMAC_CARRY_MODEL,
-    CARRY_MAX_STALE_DAYS,
     CARRY_MIN_POST_WARMUP_COVERAGE,
     CARRY_MODEL,
     CARRY_SMOOTH_SPANS,
@@ -204,7 +203,7 @@ SELECTION_BACKTEST_CACHE_VERSION = 3
 CASH_PNL_CACHE_VERSION = 3
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
-CARRY_FORECAST_CACHE_VERSION = 3
+CARRY_FORECAST_CACHE_VERSION = 4
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
@@ -844,7 +843,6 @@ def _carry_forecast_cache_spec(
         "carry_smooth_spans": rules,
         "forecast_scalar": CARRY_FORECAST_SCALAR,
         "forecast_cap": CARRY_FORECAST_CAP,
-        "max_stale_days": CARRY_MAX_STALE_DAYS,
         "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
         "min_valid_observations": min_valid_observations,
         "fdm": aft_final_rule_fdm(len(rules)),
@@ -912,24 +910,8 @@ def _load_carry_forecast_result(
                 for column in component_columns
             ]
         )
-        execution_valid = pl.lit(True)
-        if {"mark_contract", "current_contract"} <= set(frame.columns):
-            execution_valid &= (
-                pl.col("mark_contract") == pl.col("current_contract")
-            )
-        if "carry_stale_days" in frame.columns:
-            execution_valid &= pl.col("carry_stale_days").is_not_null()
-        if "point_vol" in frame.columns:
-            execution_valid &= (
-                pl.col("point_vol").is_not_null()
-                & pl.col("point_vol").is_finite()
-                & (pl.col("point_vol") > 0)
-            )
-        if "point_change" in frame.columns:
-            execution_valid &= (
-                pl.col("point_change").is_not_null()
-                & pl.col("point_change").is_finite()
-            )
+        # All carry spans share the same observation and daily execution gate.
+        execution_valid = pl.col("forecast_valid")
         weighted = pl.sum_horizontal([
             pl.col(column) / len(component_columns)
             for column in component_columns
@@ -4265,7 +4247,6 @@ def _run_complete_selection(
                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                 "forecast_cap": CARRY_FORECAST_CAP,
                 "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
-                "max_stale_days": CARRY_MAX_STALE_DAYS,
                 "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
                 "turnover_estimates": carry_turnover_estimates,
                 "turnover_source": CARRY_TURNOVER_SOURCE,
@@ -4316,7 +4297,6 @@ def _run_complete_selection(
                 "forecast_scalar": CARRY_FORECAST_SCALAR,
                 "forecast_cap": CARRY_FORECAST_CAP,
                 "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
-                "max_stale_days": CARRY_MAX_STALE_DAYS,
                 "min_post_warmup_coverage": (
                     CARRY_MIN_POST_WARMUP_COVERAGE
                 ),
@@ -4911,6 +4891,7 @@ def _run_complete_selection(
             "trend_family_forecast", "carry_family_forecast",
             "trend_forecast_valid", "carry_forecast_valid",
             "trend_family_weight", "carry_family_weight", "carry_obs_date",
+            "carry_forecast_obs_date", "carry_stale_days", "trend_forecast_missing",
             "carry_excl", "ref_tgt_pos", "ref_held_pos", "ref_return_valid",
             "ref_net_pct", "source_segment", "pt_change", "close",
             "pt_vol", "point_change", "point_vol",
@@ -5620,7 +5601,6 @@ def _run_complete_selection(
                                 "forecast_cache_version": (
                                     CARRY_FORECAST_CACHE_VERSION
                                 ),
-                                "max_stale_days": CARRY_MAX_STALE_DAYS,
                                 "min_post_warmup_coverage": (
                                     CARRY_MIN_POST_WARMUP_COVERAGE
                                 ),
@@ -5994,7 +5974,6 @@ def _run_complete_selection(
             "forecast_scalar": CARRY_FORECAST_SCALAR,
             "forecast_cap": CARRY_FORECAST_CAP,
             "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
-            "max_stale_days": CARRY_MAX_STALE_DAYS,
             "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
             "turnover_source": CARRY_TURNOVER_SOURCE,
             "afts_turnover_reference": AFT_CARRY_ANNUAL_TRADES,
@@ -6007,7 +5986,6 @@ def _run_complete_selection(
             "forecast_scalar": CARRY_FORECAST_SCALAR,
             "forecast_cap": CARRY_FORECAST_CAP,
             "forecast_cache_version": CARRY_FORECAST_CACHE_VERSION,
-            "max_stale_days": CARRY_MAX_STALE_DAYS,
             "min_post_warmup_coverage": CARRY_MIN_POST_WARMUP_COVERAGE,
             "turnover_source": CARRY_TURNOVER_SOURCE,
             "afts_turnover_reference": AFT_CARRY_ANNUAL_TRADES,

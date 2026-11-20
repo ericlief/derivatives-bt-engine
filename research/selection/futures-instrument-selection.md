@@ -1632,6 +1632,13 @@ Full selection reports include unscaled EWMAC forecasts (`raw_fcst_<fast>_<slow>
 the daily EWMAC scalars (`scalar_<fast>_<slow>`), and scaled component forecasts.
 For `ewmac_carry`, the same panel includes the joined curve legs and observation
 date, `raw_roll`, `raw_carry`, and the pre-scalar `smooth_carry_<span>`.
+Carry forecasts forward-fill after scaling and capping, including across
+long gaps and rolls. `carry_obs_date` identifies a same-session curve row,
+`carry_fcst_obs_date` identifies the observation behind the forecast in use,
+and `carry_stale_days` is its calendar age. Raw curve fields stay on their
+observed dates. In the blend, EWMAC components also forward-fill and
+`trend_fcst_missing` flags dates with missing EWMAC inputs before fill.
+The blend starts once all participating rules have a forecast.
 `carry_scalar` converts the smoothed input to forecast units before the
 per-rule cap. `wt_fcst_*` gives the final weight of each component in the
 60/40 blend. `trend_fdm` and `carry_fdm` apply to their respective family

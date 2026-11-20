@@ -54,6 +54,8 @@ PUBLIC_REPORT_RENAMES = {
     "forecast_fdm": "comb_fdm",
     "forecast_cap": "fcst_cap",
     "carry_forecast_cap": "carry_fcst_cap",
+    "carry_forecast_obs_date": "carry_fcst_obs_date",
+    "trend_forecast_missing": "trend_fcst_missing",
     "carry_forecast_scalar": "carry_scalar",
     "carry_source_timestamp": "carry_src_ts",
     "carry_source_segment": "carry_src_segment",

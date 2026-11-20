@@ -9,8 +9,12 @@
 Carry forecast cache version 3 uses a continuous, null-skipping EWMA for
 each speed. An excluded carry row leaves the forecast missing and the next
 valid row resumes the same EWMA. State also persists across provider handoffs
-and long calendar gaps. The seven-day limit on reusing a forecast for
-execution still applies.
+and long calendar gaps.
+
+Selection forecast cache version 4 forward-fills the scaled carry forecasts
+without an expiry. The raw curve and its diagnostics remain on the
+observation date. The existing pooled cost calibration retains the
+seven-day alignment and its rule-cache identity.
 
 The pooled turnover estimate still uses adjacent valid observations from
 the same provider and skips gaps longer than seven calendar days. Rebuild
