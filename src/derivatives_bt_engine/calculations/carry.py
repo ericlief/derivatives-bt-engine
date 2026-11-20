@@ -426,8 +426,8 @@ def build_carry_forecast(
 ) -> CombinedForecastResult:
     """Return a selection-compatible carry forecast for one futures history.
 
-    A same-session curve supplies a fresh forecast when its current contract
-    matches the mark. Forward-fill the resulting scaled rule forecasts on the
+    A valid same-session curve supplies a fresh forecast independently of
+    the execution contract. Forward-fill the scaled rule forecasts on the
     daily execution grid, including across rolls and long gaps. Keep raw curve
     fields on their source date and report the age in calendar days of the
     forecast used. Dates before the first valid forecast remain null.
@@ -439,8 +439,7 @@ def build_carry_forecast(
     if not 0 < min_post_warmup_coverage <= 1:
         raise ValueError("min_post_warmup_coverage must be in (0, 1]")
     execution = _history_execution_frame(history)
-    # Verify the current leg of each new curve observation against the mark.
-    # A previously calculated forecast can still be used after the mark rolls.
+    # Keep the execution contract for diagnostics and legacy turnover calibration.
     mark_contracts = history.marks.select(
         "date",
         pl.col("contract_id").alias("mark_contract"),
@@ -474,15 +473,14 @@ def build_carry_forecast(
             strategy="backward",
             tolerance=f"{turnover_max_stale_days}d",
         )
-    mark_matches = (
-        pl.col("carry_obs_valid")
-        & (pl.col("mark_contract") == pl.col("current_contract"))
-    )
-    forecast_observation_date = pl.when(mark_matches).then(pl.col("carry_obs_date"))
+    usable_observation = pl.col("carry_obs_valid")
+    if turnover_max_stale_days is not None:
+        usable_observation &= pl.col("mark_contract") == pl.col("current_contract")
+    forecast_observation_date = pl.when(usable_observation).then(pl.col("carry_obs_date"))
     if turnover_max_stale_days is None:
         forecast_observation_date = forecast_observation_date.forward_fill()
         frame = frame.with_columns(
-            pl.when(mark_matches).then(pl.col(column)).forward_fill().alias(column)
+            pl.when(usable_observation).then(pl.col(column)).forward_fill().alias(column)
             for column in forecast_columns
         )
     frame = frame.with_columns(

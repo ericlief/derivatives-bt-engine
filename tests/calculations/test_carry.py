@@ -155,8 +155,8 @@ def test_carry_forward_fills_forecasts_across_invalid_rows_and_roll(monkeypatch)
         }),
         carry=pl.DataFrame({
             "date": [dates[1], dates[2], dates[4]],
-            "current_contract": ["20240300", "20240300", "20240600"],
-            "carry_contract": ["20240600", "20240600", "20240900"],
+            "current_contract": ["20240300", "20240300", "20240300"],
+            "carry_contract": ["20240600"] * 3,
             "current_price": [100.1, 100.0, 99.9],
             "carry_price": [100.0] * 3,
         }),
@@ -179,7 +179,7 @@ def test_carry_forward_fills_forecasts_across_invalid_rows_and_roll(monkeypatch)
     calibration = build_carry_forecast(
         history, min_valid_observations=2, turnover_max_stale_days=7,
     ).frame
-    assert calibration["forecast_valid"].to_list() == [False, True, False, False, True]
+    assert calibration["forecast_valid"].to_list() == [False, True, False, False, False]
 
 
 def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:

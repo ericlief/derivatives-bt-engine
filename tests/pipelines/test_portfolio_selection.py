@@ -35,7 +35,7 @@ def test_carry_rule_smooths_parse_afts_family_in_stable_order():
 
 
 def test_carry_forecast_cache_identity_versions_forward_fill(tmp_path):
-    """The v4 identity distinguishes forward-filled and bounded forecasts."""
+    """The v5 identity refreshes carry independently of the execution contract."""
     _, _, identity, _ = _carry_forecast_cache_spec(
         tmp_path,
         artifact="carry_reference_forecast",
@@ -45,7 +45,7 @@ def test_carry_forecast_cache_identity_versions_forward_fill(tmp_path):
         min_valid_observations=256,
     )
 
-    assert CARRY_FORECAST_CACHE_VERSION == 4
+    assert CARRY_FORECAST_CACHE_VERSION == 5
     assert identity["forecast_cache_version"] == CARRY_FORECAST_CACHE_VERSION
     assert identity["carry_smooth_spans"] == [5, 20, 60, 120]
     assert "carry_smooth_coms" not in identity

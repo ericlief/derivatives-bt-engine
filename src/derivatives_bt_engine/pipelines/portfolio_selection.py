@@ -203,7 +203,7 @@ SELECTION_BACKTEST_CACHE_VERSION = 3
 CASH_PNL_CACHE_VERSION = 3
 GOULDING_FORECAST_CACHE_VERSION = 3
 RETURN_TSMOM_SCALAR_CACHE_VERSION = 1
-CARRY_FORECAST_CACHE_VERSION = 4
+CARRY_FORECAST_CACHE_VERSION = 5
 
 # Production-inspired ordinary-EWMAC template. The two slowest rules receive
 # 60% in total and the three faster rules receive 40%. Rules removed by the
