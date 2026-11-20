@@ -487,10 +487,19 @@ missing curve observations.
 | 1971-02-01 | −0.05 | null | null | 1.2648 | 1971-01-20 |
 | 1971-02-02 | +0.17 | 0.064407 | 1.029651 | 1.3141 | 1971-02-02 |
 
-Collapsing executable aliases leaves 16,505 exact zeros in 983,069
-same-session curve observations. Rates by weekday range from 1.65%
-to 1.73%. Two zero observations have weekend source timestamps, both
-carried on weekday rows. The panel contains no weekend-dated sessions.
+The forecast panel has one row per executable symbol, so a full-size
+contract and its micro can show the same underlying quote. The audit
+counts that quote once per history code, report date, source segment,
+source timestamp, contract pair and pair of prices. A same-session
+observation has a raw curve quote dated to the report session. Reusing
+a forecast from an earlier quote adds no observation to this count.
+
+Of the 983,069 distinct same-session observations, 16,505 (1.68%) had
+exactly equal prices for the current and carry legs. The exact-zero
+rate ranges from 1.65% to 1.73% across weekdays, grouped by report
+session date. Two equal-price observations had original Sunday source
+timestamps. Both were assigned to weekday sessions, so the daily
+panel contains no weekend-dated rows.
 
 | Forecast age in calendar days | Valid forecast rows |
 |---|---:|
@@ -501,10 +510,10 @@ carried on weekday rows. The panel contains no weekend-dated sessions.
 | 91–365 | 9,528 |
 | Over 365 | 12,143 |
 
-Among the 148,218 fills, median age is 30 days and the 95th percentile is
-722 days. A total of 101,844 use a forecast originating under a different
+Among the 148,218 fills, median age is 30 calendar days and the 95th percentile is
+722 calendar days. A total of 101,844 use a forecast originating under a different
 mark contract, and 18,327 cross a tagged source change. The longest age is
-3,889 days for the US30 routes MWN and UB. Both display the September 2,
+3,889 calendar days for the US30 routes MWN and UB. Both display the September 2,
 2010 forecast on April 26, 2021. MWN has 2,716 sessions without a curve
 row during that streak and 42 later raw observations that fail the mark
 contract match.
@@ -527,7 +536,7 @@ In 2026, 730 of 4,221 active cash rows used a prior observation. **669
 rows used a forecast more than a year old**, all from March 28, 2024.
 Held positions were nonzero on 668 of those rows.
 
-| Symbol | Forecast used throughout 2026 | Active cash rows | Age at last session | 2026 net P&L |
+| Symbol | Forecast used throughout 2026 | Active cash rows | Age at last session (calendar days) | 2026 net P&L |
 |---|---:|---:|---:|---:|
 | MCL | +1.7587 | 221 | 964 days | +$6,974.64 |
 | W | +2.0000 | 224 | 965 days | +$4,430.00 |
