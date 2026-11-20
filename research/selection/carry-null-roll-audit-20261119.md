@@ -1,7 +1,7 @@
 # Carry zero-roll and P&L audit, November 19, 2026
 
 The latest complete carry run finished at **$697,026.50**, up **$128,634.70**
-from the previous complete run with the same scenario settings. Both saved
+from the Nov 18 complete run with the same scenario settings. Both saved
 runs already exclude exact zero spreads from the forecast. On dates when the
 same symbol was active in both runs, the cash forecasts matched exactly,
 including missing values, and net P&L fell by **$27,695**. Dates when a symbol
@@ -33,6 +33,82 @@ the EWMA state through the gap, the latest saved run does not implement it.
   current scenario could not be verified. The zero-input comparison below
   uses the latest saved prices and forecasts as a controlled smoothing
   diagnostic.
+
+## Requested comparison with November 17 at 12:24:47
+
+This section compares `selection_run_20261117_122447` with
+`selection_run_20261119_184649` using both runs' saved Parquets in the VM's
+mirrored results tree. The Mac path under `/Users/liefe` is outside this
+workspace. The directory name and scenario match the specified run. The
+forecast panel and executable cash ledger agree on its exact-zero
+treatment.
+
+| Saved evidence | Nov 17 at 12:24:47 | Nov 19 at 18:46:49 |
+|---|---:|---:|
+| Forecast rows labeled `zero_raw_roll` | 14,024 | 17,524 |
+| Of those, null raw carry and null combined forecast | 14,024 | 17,524 |
+| Exact-zero to valid same-session transitions | 6,677 | 7,613 |
+| Of those, new segment and Carry120 equal to that day's raw carry | 6,677 | 7,613 |
+| Active cash rows matching a zero-roll exclusion | 1,750 | 1,987 |
+| Of those, null forecast and null target | 1,750 | 1,987 |
+| Of those, nonzero held contracts | 839 | 879 |
+| Position-changing trades on those rows | 0 | 0 |
+
+On the 1,002,514 paired symbol-dates, 13,992 shared an exact-zero exclusion.
+Both runs saved null raw carry and a null combined forecast for all of
+them. Five Nov 17 rows displayed numeric zeros in both `raw_roll` and
+`raw_carry` while remaining valid. An exact-price lookup confirmed all
+five had nonzero source spreads, from a floating-point residual near
+4.44×10⁻¹⁶ in HG and MHG to 0.00005 in ZB. The displayed zeros result
+from report rounding. For ZL on January 7, 8 and 11, 1971, both runs have
+identical segment IDs of 12, 13 and 14 and identical combined forecasts of
+1.8038, null and 0.3734.
+
+The reset comes from `_carry_segment_expression`. Its `invalid_break`
+fires whenever the current or previous `carry_valid` flag is false.
+The exact-zero filter sets that flag false, and the EWMA runs separately
+within each resulting segment. The next valid day therefore has one
+observation in its new EWMA group. Setting `ignore_nulls=True` alone
+would leave those groups intact. To skip an isolated equal-price quote
+while retaining EWMA state, the segmentation condition must distinguish
+an excluded observation from a structural gap. Missing forecasts can
+still leave the execution target null on the skipped day. Source changes
+and gaps longer than the configured seven days can still start new
+segments. This audit measures the behavior in the saved runs.
+
+On 891,288 jointly valid forecast rows, 18,862 values differed, mean
+absolute difference was 0.00549 and sign agreement was 99.89%. There
+were 8,597 raw carry differences and 1,058 point-change differences
+where both values were present. The saved panels differ in history and
+rule inputs, so the full-run P&L comparison cannot isolate smoother
+behavior.
+
+![Fixed-cap equity and equity difference for the requested Nov 17 and Nov 19 carry runs](carry-equity-nov17-vs-nov19-20261119.png)
+
+| $75,000 fixed cap | Nov 17 at 12:24:47 | Nov 19 at 18:46:49 |
+|---|---:|---:|
+| Equity at common complete-book endpoint, Nov 12, 2026 | $602,213.57 | $696,530.38 |
+| Net P&L through that endpoint, cumulative curve | $527,213.57 | $621,530.38 |
+| Annualized arithmetic return on 13,985 paired complete sessions | 12.87% | 15.16% |
+| Annualized volatility on those sessions | 18.68% | 18.65% |
+| Sharpe on those sessions | 0.689 | 0.813 |
+| Max percentage drawdown through the common endpoint | −28.10% | −28.33% |
+| Gross P&L through common endpoint, sum of rounded daily curve | $598,536.12 | $694,213.87 |
+| Trading and roll fees through common endpoint, summed daily | $71,323.46 | $72,683.28 |
+
+The latest equity was **$94,316.81 higher** on November 12. The older
+curve extends to November 16 with incomplete book observations after
+November 12. The latest reaches November 18 at $697,026.50. The older
+full cash ledger reconciles to the sum of rounded daily portfolio net
+within $0.40. The latest reconciles within $0.23. On the common window,
+symbol-days active only in the latest run contributed **+$129,526**,
+those active only in the earlier run **−$2,323**, shared active
+symbol-days **−$33,057**, and rows inactive in both **+$171**. The
+latest run added $66,454 of P&L in I and $26,440 in W, and lost $29,158
+relative to the older run in SOFR3. The measured gap was about −$12,009
+at the end of 1999, +$40,575 at the end of 2009 and +$90,078 at the end
+of 2019. Within the common 2026 slice, the old run lost $8,619.86 and
+the latest lost $8,714.95.
 
 ## What goes null
 
