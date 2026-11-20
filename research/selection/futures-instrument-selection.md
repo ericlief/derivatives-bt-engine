@@ -1638,10 +1638,14 @@ long gaps and rolls. `carry_obs_date` identifies a same-session curve row,
 and `carry_stale_days` is its calendar age. Raw curve fields stay on their
 observed dates. In the blend, EWMAC components also forward-fill and
 `trend_fcst_missing` flags dates with missing EWMAC inputs before fill.
-The blend starts once all participating rules have a forecast.
+The blend starts with the first available eligible rule. On each date,
+finite component forecasts share the configured base weights in proportion
+to their original weights. The full set uses 60/40, a single available
+family takes the full weight, and a date with no usable rule stays null.
+The fixed AFTS FDM comes from the table using the count of positively weighted
+configured rules.
 `carry_scalar` converts the smoothed input to forecast units before the
-per-rule cap. `wt_fcst_*` gives the final weight of each component in the
-60/40 blend. `trend_fdm` and `carry_fdm` apply to their respective family
+per-rule cap. `wt_fcst_*` gives the effective daily weight of each component. `trend_fdm` and `carry_fdm` apply to their respective family
 forecast columns. `comb_fdm` applies to the final weighted component sum.
 The combined selection panel uses the reference history; the stitched cash
 P&L report tracks the executable replay, including an IB tail where available.

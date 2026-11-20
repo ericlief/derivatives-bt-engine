@@ -573,11 +573,11 @@ def combine_trend_and_carry_forecasts(
 
     The function reconstructs each family before its family-only FDM, applies
     60% to the caller's EWMAC rule weights and 40% equally across carry rules,
-    then applies one AFTS FDM based on the total final component count.  This
-    avoids double-counting the carry-only and trend-only diversification
-    multipliers. The carry components entering this blend already have their
-    scalar and per-component cap, but their carry-only combined forecast/FDM is
-    deliberately not used here.
+    and normalizes those base weights over finite forecasts each session.
+    The fixed AFTS FDM uses the count of positively weighted configured rules.
+    Both families supply scaled, capped components. The trend frame supplies
+    the daily execution grid. A row with no available weighted rules remains
+    null.
     """
     if trend_weight < 0 or carry_weight < 0 or not math.isclose(
         trend_weight + carry_weight,
@@ -680,44 +680,46 @@ def combine_trend_and_carry_forecasts(
             for column in trend_columns.values()
         ),
     )
-    weighted_components = [
-        pl.col(trend_columns[rule]) * final_weights[f"trend:{rule}"]
-        for rule in trend.weights
-    ] + [
-        pl.col(carry_columns[rule]) * final_weights[f"carry:{rule}"]
-        for rule in carry.weights
-    ]
-    component_columns = list(trend_columns.values()) + list(carry_columns.values())
-    valid_expr = pl.all_horizontal(
-        [
-            pl.col(column).is_not_null() & pl.col(column).is_finite()
-            for column in component_columns
-        ]
-    )
-    fdm = aft_final_rule_fdm(len(final_weights))
+    component_weights = {
+        column: final_weights[f"{family}:{rule}"]
+        for family, columns in (("trend", trend_columns), ("carry", carry_columns))
+        for rule, column in columns.items()
+    }
+    available_weights = {
+        column: pl.when(pl.col(column).is_finite()).then(weight).otherwise(0.0)
+        for column, weight in component_weights.items()
+    }
+    available_total = pl.sum_horizontal(list(available_weights.values()))
+    active_rule_count = sum(weight > 0 for weight in component_weights.values())
+    fdm = aft_final_rule_fdm(active_rule_count)
     frame = frame.with_columns(
-        valid_expr.alias("forecast_valid"),
+        (available_total > 0).alias("forecast_valid"),
         pl.lit(trend.fdm).alias("trend_fdm"),
         pl.lit(carry.fdm).alias("carry_fdm"),
         pl.lit(fdm).alias("forecast_fdm"),
         pl.lit(forecast_cap).alias("forecast_cap"),
-        pl.lit(trend_weight).alias("trend_family_weight"),
-        pl.lit(carry_weight).alias("carry_family_weight"),
         *(
-            pl.lit(final_weights[f"trend:{rule}"]).alias(f"wt_{column}")
-            for rule, column in trend_columns.items()
-        ),
-        *(
-            pl.lit(final_weights[f"carry:{rule}"]).alias(f"wt_{column}")
-            for rule, column in carry_columns.items()
+            pl.when(available_total > 0)
+            .then(weight / available_total)
+            .otherwise(0.0)
+            .alias(f"wt_{column}")
+            for column, weight in available_weights.items()
         ),
     ).with_columns(
+        pl.sum_horizontal([f"wt_{column}" for column in trend_columns.values()])
+        .alias("trend_family_weight"),
+        pl.sum_horizontal([f"wt_{column}" for column in carry_columns.values()])
+        .alias("carry_family_weight"),
         pl.when(pl.col("forecast_valid"))
         .then(
-            (pl.sum_horizontal(weighted_components) * fdm).clip(
-                -forecast_cap,
-                forecast_cap,
-            )
+            (
+                pl.sum_horizontal([
+                    pl.when(pl.col(f"wt_{column}") > 0)
+                    .then(pl.col(column) * pl.col(f"wt_{column}"))
+                    .otherwise(0.0)
+                    for column in component_weights
+                ]) * fdm
+            ).clip(-forecast_cap, forecast_cap)
         )
         .otherwise(None)
         .alias("combined_forecast")
@@ -733,7 +735,7 @@ def combine_trend_and_carry_forecasts(
         "carry_family_weight": carry_weight,
         "trend_forecast_elig": bool(trend.audit.get("forecast_elig", True)),
         "carry_forecast_elig": bool(carry.audit.get("forecast_elig", True)),
-        "final_rule_n": len(final_weights),
+        "final_rule_n": active_rule_count,
         "combined_nulls": frame.get_column("combined_forecast").null_count(),
         "combined_nonfinite": frame.filter(
             pl.col("combined_forecast").is_not_null()
@@ -743,20 +745,12 @@ def combine_trend_and_carry_forecasts(
     audit["forecast_elig"] = bool(
         valid.height >= min_valid_observations
         and audit["combined_nonfinite"] == 0
-        and audit["trend_forecast_elig"]
-        and audit["carry_forecast_elig"]
     )
     audit["forecast_excl"] = (
-        ""
-        if audit["forecast_elig"]
-        else (
-            "insufficient_valid_forecast_obs"
-            if valid.height < min_valid_observations
-            else "nonfinite_combined_forecast"
-            if audit["combined_nonfinite"]
-            else str(carry.audit.get("forecast_excl") or "carry_forecast_ineligible")
-            if not audit["carry_forecast_elig"]
-            else str(trend.audit.get("forecast_excl") or "trend_forecast_ineligible")
-        )
+        "nonfinite_combined_forecast"
+        if audit["combined_nonfinite"]
+        else "insufficient_valid_forecast_obs"
+        if not audit["forecast_elig"]
+        else ""
     )
     return CombinedForecastResult(frame, final_weights, fdm, audit)

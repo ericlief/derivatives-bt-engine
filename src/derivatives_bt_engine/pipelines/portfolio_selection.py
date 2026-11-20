@@ -4256,6 +4256,7 @@ def _run_complete_selection(
                 },
             }
             reference_base_identity["trend_carry_blend"] = {
+                "weight_policy": "available_rules",
                 "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
                 "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
                 "carry_rules": carry_smooths,
@@ -5615,6 +5616,7 @@ def _run_complete_selection(
                             }
                             if args.signal_model == EWMAC_CARRY_MODEL:
                                 stitched_identity["trend_carry_blend"] = {
+                                    "weight_policy": "available_rules",
                                     "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
                                     "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
                                     "carry_rules": carry_smooths,
@@ -5980,6 +5982,7 @@ def _run_complete_selection(
         }
     elif args.signal_model == EWMAC_CARRY_MODEL:
         selection_policy_identity["trend_carry_blend"] = {
+            "weight_policy": "available_rules",
             "trend_weight": DEFAULT_TREND_FAMILY_WEIGHT,
             "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
             "available_smooth_spans": CARRY_SMOOTH_SPANS,

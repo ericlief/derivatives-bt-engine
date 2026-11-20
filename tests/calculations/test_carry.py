@@ -272,3 +272,54 @@ def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
     assert sum(
         weight for rule, weight in result.weights.items() if rule.startswith("carry:")
     ) == pytest.approx(0.40)
+
+
+@pytest.mark.parametrize("first_family", ["trend", "carry"])
+def test_trend_carry_blend_renormalizes_available_rules(first_family: str) -> None:
+    """A single rule can start the blend and missing rules carry zero weight."""
+    dates = _dates(4)
+    trend_first = first_family == "trend"
+    trend = CombinedForecastResult(
+        pl.DataFrame({
+            "date": dates,
+            "fcst_4_16": [None, 1.0 if trend_first else None, 1.0, None],
+            "fcst_8_32": [None, None, float("nan"), 0.5],
+            "combined_forecast": [None] * 4,
+            "forecast_valid": [False] * 4,
+        }),
+        {"4/16": 0.25, "8/32": 0.75},
+        1.02,
+        {"forecast_elig": False},
+    )
+    carry = CombinedForecastResult(
+        pl.DataFrame({
+            "date": dates,
+            "fcst_carry_20": [None, None if trend_first else -1.0, -1.0, -1.0],
+            "combined_forecast": [None] * 4,
+            "forecast_valid": [False] * 4,
+        }),
+        {"carry20": 1.0},
+        1.0,
+        {"forecast_elig": False},
+    )
+
+    blend = combine_trend_and_carry_forecasts(
+        trend, carry, min_valid_observations=2,
+    )
+    frame = blend.frame
+
+    assert blend.audit["forecast_elig"]
+    assert frame["forecast_valid"].to_list() == [False, True, True, True]
+    assert frame["combined_forecast"][0] is None
+    assert frame["wt_fcst_8_32"].to_list() == pytest.approx([0, 0, 0, 0.45])
+    assert frame["trend_family_weight"].to_list() == pytest.approx(
+        [0, float(trend_first), 0.15 / 0.55, 0.6]
+    )
+    assert frame["carry_family_weight"].to_list() == pytest.approx(
+        [0, float(not trend_first), 0.40 / 0.55, 0.4]
+    )
+    assert frame["combined_forecast"][1:].to_list() == pytest.approx([
+        blend.fdm if trend_first else -blend.fdm,
+        blend.fdm * (0.15 - 0.40) / 0.55,
+        blend.fdm * (0.15 + 0.45 * 0.5 - 0.40),
+    ])
