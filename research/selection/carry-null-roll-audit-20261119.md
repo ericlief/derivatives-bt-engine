@@ -472,7 +472,11 @@ null. Of these, 58 symbol-date rows occur before the symbol's first
 usable carry forecast. An equal-price pair supplies no input to any
 carry speed, and there is no earlier forecast to reuse, so the combined
 forecast stays null. On the other 17,016 rows, the last usable forecast
-carries forward. On the next fresh observation after a zero, the saved
+carries forward. The 58 warm-up rows span 18 executable symbols. SSG
+has 12, KU 9, N225M 8, OAT 5, JPY 4, GSCI, MXEA and ZS 3 each, and
+DJSD 2. CAD, DA, MCD, MHI, PL, SIR, SND, SPI and TSR20 each have one.
+
+On the next fresh observation after a zero, the saved
 120-span smoother differs from the day's raw carry by more than 0.0001
 in 7,408 of 7,418 cases. Recomputing the configured EWMAs with null
 observations skipped exactly reproduces the full-precision smoothers in
