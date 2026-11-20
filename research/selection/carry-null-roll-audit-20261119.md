@@ -446,6 +446,31 @@ path. Forecast probation uses a 256-session lookback, thresholds of 0.50 and
 PST turnover estimates for all four speeds. The scenario folder and filename
 pattern are listed above under Artifact locations.
 
+### Contract-match fix and MWN replay
+
+Commit `233aad2` allows a valid same-session carry curve to refresh the
+forecast independently of the execution mark's contract. The results
+below describe the saved run before the fix. In that run MWN's daily
+marks and point changes continued to update during its 3,889-calendar-day
+forecast freeze. The contract check blocked 42 valid curve observations,
+and 2,716 sessions had no curve row during the streak.
+
+A replay of the saved US30 inputs with the fix refreshed the forecast
+on each of the four quarterly observations below. The maximum forecast
+age across the replay fell to 91 calendar days. December 10, 2010 still
+has no raw curve observation.
+
+| MWN session | Forecast in saved run | Forecast after fix | Age after fix (calendar days) |
+|---|---:|---:|---:|
+| 2010-12-01 | 0.2260 | 0.4935 | 0 |
+| 2011-03-02 | 0.2260 | 0.7899 | 0 |
+| 2011-06-02 | 0.2260 | 0.9544 | 0 |
+| 2011-09-02 | 0.2260 | 0.8948 | 0 |
+
+The rule cache is reusable. Selection uses v5 derived forecast artifacts
+for the new behavior. The MWN replay verifies signal refreshes. Portfolio
+P&L and selection effects after the fix remain unmeasured.
+
 ### Forecasts and age of observations
 
 Across 177 routes, the saved panel has 1,165,773 unique symbol-dates and
