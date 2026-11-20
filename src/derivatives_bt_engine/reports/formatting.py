@@ -51,6 +51,15 @@ PUBLIC_REPORT_RENAMES = {
     "number_economic_subclasses": "n_econ_subcls",
     "selected_symbols": "symbols",
     "combined_forecast": "comb_fcst",
+    "forecast_fdm": "comb_fdm",
+    "forecast_cap": "fcst_cap",
+    "carry_forecast_cap": "carry_fcst_cap",
+    "carry_forecast_scalar": "carry_scalar",
+    "carry_source_timestamp": "carry_src_ts",
+    "carry_source_segment": "carry_src_segment",
+    "carry_curve_source_segment": "carry_curve_src_segment",
+    "carry_current_price": "carry_current_px",
+    "carry_current_contract": "carry_current_con",
     "forecast_month": "fcst_month",
     "goulding_signal_mode": "g_mode",
     "goulding_fast_months": "g_fast_months",
@@ -1070,6 +1079,13 @@ def rename_public_report_columns(report: pl.DataFrame) -> pl.DataFrame:
 # need extra precision for reproducible sizing and audit work.
 SIX_DECIMAL_COLUMNS = {
     "fx_to_usd",
+    "carry_scalar",
+    "raw_roll",
+    "raw_carry",
+    "ann_roll",
+    "con_yr_frac",
+    "ann_point_vol",
+    "carry_current_px",
     "con_px",
     "point_change",
     "pt_change",
@@ -1197,8 +1213,10 @@ def round_public_report(report: pl.DataFrame) -> pl.DataFrame:
             decimals = 2
         elif name in FOUR_DECIMAL_PNL_COLUMNS:
             decimals = 4
-        elif name in SIX_DECIMAL_COLUMNS or name.endswith(
-            SIX_DECIMAL_SUFFIXES
+        elif (
+            name in SIX_DECIMAL_COLUMNS
+            or name.endswith(SIX_DECIMAL_SUFFIXES)
+            or name.startswith(("scalar_", "raw_fcst_", "smooth_carry_", "wt_fcst_"))
         ):
             decimals = 6
         else:

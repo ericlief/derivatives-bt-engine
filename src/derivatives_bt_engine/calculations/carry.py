@@ -383,7 +383,13 @@ def build_carry_components(
     weighted = pl.sum_horizontal(
         [pl.col(column) * weight for column in component_columns]
     )
-    frame = frame.with_columns(component_valid.alias("forecast_valid")).with_columns(
+    frame = frame.with_columns(
+        component_valid.alias("forecast_valid"),
+        pl.lit(forecast_scalar).alias("carry_forecast_scalar"),
+        pl.lit(forecast_cap).alias("carry_forecast_cap"),
+        pl.lit(fdm).alias("carry_fdm"),
+        pl.lit(fdm).alias("forecast_fdm"),
+    ).with_columns(
         pl.when(pl.col("forecast_valid"))
         # FDM diversifies the weighted rule combination; it is not a separate
         # multiplier embedded in each smoothed speed. Cap again after FDM.
@@ -600,9 +606,35 @@ def combine_trend_and_carry_forecasts(
             f"trend={missing_trend}, carry={missing_carry}"
         )
 
+    # The trend frame owns the daily marks. Label overlapping carry inputs
+    # explicitly because they belong to the potentially older curve observation.
+    carry_diagnostics = (
+        "carry_obs_date", "carry_stale_days", "carry_obs_valid",
+        "carry_price", "carry_contract",
+        "current_con_yr", "carry_con_yr", "con_yr_frac", "ann_point_vol",
+        "raw_roll", "ann_roll", "raw_carry", "carry_valid", "carry_excl",
+        "carry_forecast_scalar", "carry_forecast_cap",
+        *(
+            name
+            for rule, column in carry_columns.items()
+            for name in (f"smooth_carry_{rule[5:]}", column)
+        ),
+    )
+    carry_provenance = {
+        "source_timestamp": "carry_source_timestamp",
+        "source_segment": "carry_source_segment",
+        "source_segment_right": "carry_curve_source_segment",
+        "quality_flag": "carry_quality_flag",
+        "current_price": "carry_current_price",
+        "current_contract": "carry_current_contract",
+    }
     carry_owned = [
         "date",
-        *carry_columns.values(),
+        *(
+            pl.col(name).alias(carry_provenance.get(name, name))
+            for name in (*carry_diagnostics, *carry_provenance)
+            if name in carry.frame.columns
+        ),
         pl.col("combined_forecast").alias("carry_family_forecast"),
         pl.col("forecast_valid").alias("carry_forecast_valid"),
     ]
@@ -638,7 +670,23 @@ def combine_trend_and_carry_forecasts(
         ]
     )
     fdm = aft_final_rule_fdm(len(final_weights))
-    frame = frame.with_columns(valid_expr.alias("forecast_valid")).with_columns(
+    frame = frame.with_columns(
+        valid_expr.alias("forecast_valid"),
+        pl.lit(trend.fdm).alias("trend_fdm"),
+        pl.lit(carry.fdm).alias("carry_fdm"),
+        pl.lit(fdm).alias("forecast_fdm"),
+        pl.lit(forecast_cap).alias("forecast_cap"),
+        pl.lit(trend_weight).alias("trend_family_weight"),
+        pl.lit(carry_weight).alias("carry_family_weight"),
+        *(
+            pl.lit(final_weights[f"trend:{rule}"]).alias(f"wt_{column}")
+            for rule, column in trend_columns.items()
+        ),
+        *(
+            pl.lit(final_weights[f"carry:{rule}"]).alias(f"wt_{column}")
+            for rule, column in carry_columns.items()
+        ),
+    ).with_columns(
         pl.when(pl.col("forecast_valid"))
         .then(
             (pl.sum_horizontal(weighted_components) * fdm).clip(

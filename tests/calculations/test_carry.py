@@ -148,6 +148,9 @@ def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
                 "date": dates,
                 "point_change": [0.1] * 3,
                 "point_vol": [1.0] * 3,
+                "source_segment": ["trend-source"] * 3,
+                "raw_fcst_4_16": [0.5] * 3,
+                "scalar_4_16": [2.0] * 3,
                 **trend_columns,
                 "forecast_valid": [True] * 3,
                 "combined_forecast": [1.0] * 3,
@@ -168,6 +171,12 @@ def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
             {
                 "date": dates,
                 **{f"fcst_carry_{span}": [-1.0] * 3 for span in (5, 20, 60, 120)},
+                "carry_obs_date": dates,
+                "source_segment": ["carry-source"] * 3,
+                "raw_roll": [-0.2] * 3,
+                "raw_carry": [-1 / 30] * 3,
+                "smooth_carry_5": [-1 / 30] * 3,
+                "carry_forecast_scalar": [30.0] * 3,
                 "forecast_valid": [True] * 3,
                 "combined_forecast": [-1.23] * 3,
             }
@@ -185,6 +194,23 @@ def test_trend_carry_blend_uses_60_40_and_nine_rule_fdm() -> None:
 
     # Pre-FDM family forecast is 0.6 * 1 + 0.4 * -1 = 0.2.
     assert result.fdm == pytest.approx(1.34)
+    first = result.frame.row(0, named=True)
+    assert first["trend_fdm"] == pytest.approx(1.25)
+    assert first["carry_fdm"] == pytest.approx(1.23)
+    assert first["forecast_fdm"] == pytest.approx(1.34)
+    assert first["source_segment"] == "trend-source"
+    assert first["carry_source_segment"] == "carry-source"
+    assert first["carry_obs_date"] == dates[0]
+    assert first["raw_roll"] == pytest.approx(-0.2)
+    assert first["raw_carry"] == pytest.approx(-1 / 30)
+    assert first["smooth_carry_5"] * first["carry_forecast_scalar"] == pytest.approx(
+        first["fcst_carry_5"]
+    )
+    assert first["raw_fcst_4_16"] * first["scalar_4_16"] == pytest.approx(
+        first["fcst_4_16"]
+    )
+    assert first["wt_fcst_4_16"] == pytest.approx(0.03)
+    assert first["wt_fcst_carry_5"] == pytest.approx(0.10)
     assert result.frame["combined_forecast"].to_list() == pytest.approx(
         [0.268] * 3
     )

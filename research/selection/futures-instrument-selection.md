@@ -1626,6 +1626,26 @@ The built-in filter calculates `max_ann_dvol`, `risk_traded_usd_day`,
 `selection_elig` before candidate filtering. It does not alter the saved market
 observations or cached per-rule statistics.
 
+### Forecast audit detail
+
+Full selection reports include unscaled EWMAC forecasts (`raw_fcst_<fast>_<slow>`),
+the daily EWMAC scalars (`scalar_<fast>_<slow>`), and scaled component forecasts.
+For `ewmac_carry`, the same panel includes the joined curve legs and observation
+date, `raw_roll`, `raw_carry`, and the pre-scalar `smooth_carry_<span>`.
+`carry_scalar` converts the smoothed input to forecast units before the
+per-rule cap. `wt_fcst_*` gives the final weight of each component in the
+60/40 blend. `trend_fdm` and `carry_fdm` apply to their respective family
+forecast columns. `comb_fdm` applies to the final weighted component sum.
+The combined selection panel uses the reference history; the stitched cash
+P&L report tracks the executable replay, including an IB tail where available.
+
+`--compact` is shorthand for `--selection-report-mode compact`. It writes the
+same report types, with a narrower daily forecast panel and scheduled trial
+summary. The compact forecast panel keeps the combined and family forecasts,
+validity, FDMs, and reference positions and returns. Compact scheduled trial
+allocations retain accepted passes for greedy selection or the terminal pass
+for beam search. Final dated allocations and cash P&L remain available.
+
 The build command continues through forecast combination and the greedy AFTS
 baseline by default. The command writes:
 

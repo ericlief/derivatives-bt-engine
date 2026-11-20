@@ -426,13 +426,15 @@ def test_return_tsmom_signal_model_exposes_parameterized_horizons():
 
 
 def test_selection_compact_report_mode_is_explicit():
-    """Large robustness grids can omit duplicated exhaustive audit panels."""
+    """Both spellings enable reduced report detail."""
     args = parse_args([
         "--signal-model", "multi_ewmac",
         "--selection-report-mode", "compact",
     ])
 
     assert args.selection_report_mode == "compact"
+    assert parse_args(["--signal-model", "ewmac_carry", "--compact"]).selection_report_mode == "compact"
+    assert parse_args(["--signal-model", "ewmac_carry"]).selection_report_mode == "full"
 
 
 def test_backtest_period_is_typed_and_inclusive():
