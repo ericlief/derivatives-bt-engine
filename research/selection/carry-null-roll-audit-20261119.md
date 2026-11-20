@@ -83,6 +83,51 @@ where both values were present. The saved panels differ in history and
 rule inputs, so the full-run P&L comparison cannot isolate smoother
 behavior.
 
+### Cumulative P&L before the IB tail
+
+The Nov 17 forecast export contains PST reference forecasts only and
+ends on March 29, 2024. The selection code at the time
+(`36e5f0d`) exported the reference forecasts, then built a separate
+stitched carry tail for cash replay. The saved cash ledger corroborates
+that split. It labels the extending histories `stitched` and has 9,460
+active rows with a non-null combined forecast after the reference
+export ends. The ledger continues through November 16, 2026 and lacks
+per-row handoff tags. The Nov 19 cash ledger explicitly tags IB rows
+from March 29, 2024 onward. Both saved cash curves were cut at March 28,
+2024 for the common pre-tail comparison.
+
+| $75,000 fixed cap through March 28, 2024 | Nov 17 at 12:24:47 | Nov 19 at 18:46:49 |
+|---|---:|---:|
+| Cumulative net P&L | $542,268.65 | $643,546.97 |
+| Ending equity | $617,268.65 | $718,546.97 |
+| Cumulative gross P&L | $610,762.01 | $713,416.23 |
+| Trading and roll fees | $68,493.36 | $69,869.26 |
+| Annualized arithmetic return on 13,302 paired complete sessions | 13.89% | 16.50% |
+| Annualized volatility on those sessions | 18.76% | 18.75% |
+| Sharpe on those sessions | 0.740 | 0.880 |
+
+The latest run was ahead by **$101,278.32 before the IB cash tail**.
+Both curves were flat on March 29. Removing every explicitly IB-tagged
+cash row from Nov 19 leaves $643,546.96 of net P&L in the rounded cash
+ledger, within one cent of the portfolio curve. Those tagged rows sum
+to **−$21,520.47** through the
+latest endpoint. The broader forecast panel has one earlier IB price
+row on March 28, with a null forecast. Cutting both cash curves a
+session earlier, on March 27, gives $543,863.62 versus $645,433.42,
+a **$101,569.80** difference. The cash-ledger sums through March 28
+reconcile to the stored cumulative values within one cent in both runs.
+
+Including dates through November 12, 2026 narrows the gap by **$6,961.51**.
+Over that added window the Nov 17 cash book lost $15,055.08 and the Nov
+19 book lost $22,016.59. Before the tail, symbol-days active in exactly
+one run contributed **+$126,024** to the gap. Symbol-days active in both
+contributed **−$24,724**, and days inactive in both contributed **−$22**.
+These are sums of the saved decisions. Cutting the ledgers leaves the
+original books, rules, and forecasts in place, including any influence
+of tail coverage on the original selection inputs.
+
+### Saved curves with the tail
+
 ![Fixed-cap equity and equity difference for the requested Nov 17 and Nov 19 carry runs](carry-equity-nov17-vs-nov19-20261119.png)
 
 | $75,000 fixed cap | Nov 17 at 12:24:47 | Nov 19 at 18:46:49 |
