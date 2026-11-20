@@ -191,8 +191,9 @@ def _select_contract_detail(
     instrument_code: str,
     contract_month: str,
     ignore_weekly: bool,
+    lookup_exact=None,
 ):
-    """Return the unique IB detail matching a configured contract month."""
+    """Resolve a contract month, retrying an unambiguous full expiry with IB."""
     matching = [
         detail
         for detail in details
@@ -207,6 +208,25 @@ def _select_contract_detail(
                 str(detail.contract.localSymbol),
             )
         ]
+    if len(matching) > 1 and lookup_exact is not None:
+        # A month lookup can include an older listing with the same delivery
+        # month. Use the full last-trade date supplied by IB for the retry.
+        expirations = {
+            value[:8]
+            for detail in matching
+            if (value := str(detail.contract.lastTradeDateOrContractMonth))
+            and value.startswith(contract_month)
+            and re.fullmatch(r"\d{8}(?:\s.*)?", value)
+        }
+        if len(expirations) == 1:
+            expiration = next(iter(expirations))
+            exact = [
+                detail
+                for detail in lookup_exact(expiration)
+                if str(detail.contract.lastTradeDateOrContractMonth)[:8] == expiration
+            ]
+            if len(exact) == 1:
+                return exact[0]
     if not matching:
         return None
     if len(matching) != 1:
@@ -588,11 +608,17 @@ def load_roll_cycle_ib_contract_history(
                 exc,
             )
             continue
+        def lookup_exact(expiration: str):
+            """Retry IB contract details for the full last-trade date."""
+            pattern.lastTradeDateOrContractMonth = expiration
+            return ib.req_contract_details(pattern)
+
         detail = _select_contract_detail(
             details,
             instrument_code=pst_instr_code,
             contract_month=contract_month,
             ignore_weekly=ignore_weekly,
+            lookup_exact=lookup_exact,
         )
         if detail is None:
             logger.debug(

@@ -1,6 +1,7 @@
 """Tests for roll-aware Interactive Brokers dated-contract acquisition."""
 
 from datetime import date
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -214,3 +215,28 @@ def test_stored_history_rejects_shorter_expired_contract_fetch(
             history_db_path=history_db,
             update_history=False,
         )
+
+
+def test_ambiguous_contract_month_retries_unique_exact_expiration() -> None:
+    """Use the December expiry when the month lookup also returns an old listing."""
+    old, current = [
+        SimpleNamespace(
+            contractMonth="202612",
+            contract=SimpleNamespace(
+                lastTradeDateOrContractMonth=expiry, localSymbol=symbol,
+            ),
+        )
+        for expiry, symbol in [("20261120", "OLD"), ("20261216", "AWZ6")]
+    ]
+    requested = []
+
+    def lookup_exact(expiration: str) -> list:
+        """Return the listing matched by the exact retry."""
+        requested.append(expiration)
+        return [current]
+
+    assert ib_loader._select_contract_detail(
+        (old, current), instrument_code="BBCOMM", contract_month="202612",
+        ignore_weekly=False, lookup_exact=lookup_exact,
+    ) is current
+    assert requested == ["20261216"]
