@@ -467,12 +467,20 @@ on 21.47% of valid rows. M1MSA is the sole subsystem exclusion, with
 | No same-session curve row | 114,805 | 109,392 |
 | Invalid point volatility on curve row | 1,150 | 0 |
 
+The volatility estimator requires 10 valid price changes. Each carry
+EWMA can start with one valid raw carry observation. The forecast can
+first be used when volatility is available and a valid curve's current
+contract matches the mark. All 177 symbols had at least 10 report rows
+before the first usable forecast. Of these, 117 had exactly 10 and 60
+had more. The exact-zero counts below describe one reason a forecast
+can be missing during this initial period.
+
 On all 17,074 exact-zero rows, raw carry and each unscaled smoother are
 null. Of these, 58 symbol-date rows occur before the symbol's first
 usable carry forecast. An equal-price pair supplies no input to any
 carry speed, and there is no earlier forecast to reuse, so the combined
 forecast stays null. On the other 17,016 rows, the last usable forecast
-carries forward. The 58 warm-up rows span 18 executable symbols. SSG
+carries forward. The 58 exact-zero rows before the first usable forecast span 18 executable symbols. SSG
 has 12, KU 9, N225M 8, OAT 5, JPY 4, GSCI, MXEA and ZS 3 each, and
 DJSD 2. CAD, DA, MCD, MHI, PL, SIR, SND, SPI and TSR20 each have one.
 
