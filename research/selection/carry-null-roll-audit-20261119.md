@@ -1,5 +1,9 @@
 # Carry zero-roll and P&L audit, November 19, 2026
 
+The [23:01 carry-only audit](#carry-only-forward-fill-run-november-19-at-230106)
+covers the saved forward-fill run. The historical comparisons below
+describe earlier runs.
+
 The latest complete carry run finished at **$697,026.50**, up **$128,634.70**
 from the Nov 18 complete run with the same scenario settings. Both saved
 runs already exclude exact zero spreads from the forecast. On dates when the
@@ -430,3 +434,252 @@ The relevant filenames are `carry_selection_{forecasts,forecast_audit,cash_pnl,p
 Raw PST checks read
 `/home/dev/fin/db/pysystemtrade_reference.duckdb`, table
 `raw.multiple_prices`. The audit did not modify the source runs or caches.
+
+## Carry-only forward-fill run, November 19 at 23:01:06
+
+This section audits `selection_run_20261119_230106` from its saved Parquets.
+The run uses $75,000 fixed sizing capital, 20% target volatility, annual
+selection with `topdown_classif` weights, 15% instrument and 50% book margin
+caps, a minimum estimated maximum position of one contract, and one search
+path. Forecast probation uses a 256-session lookback, thresholds of 0.50 and
+0.25, and two weak reviews. The candidate report identifies the v3 continuous
+PST turnover estimates for all four speeds. The scenario folder and filename
+pattern are listed above under Artifact locations.
+
+### Forecasts and age of observations
+
+Across 177 routes, the saved panel has 1,165,773 unique symbol-dates and
+1,159,110 valid forecasts. Every forecast observation date agrees with the
+last same-session valid curve whose current contract matches the mark.
+All four filled rule forecasts match their originating values at saved
+precision, with no future observation dates. Reconstructing the final
+forecast from the reported components and weights agrees within 0.00011.
+The scalar is 3 and the rule and combined caps are ±2. There are 166 routes
+configured for all four speeds with FDM 1.23, nine for three speeds with
+FDM 1.03, and two for two speeds with FDM 1.02. The combined cap is hit
+on 21.47% of valid rows. M1MSA is the sole subsystem exclusion, with
+195 valid forecasts against the 256-observation minimum.
+
+| Saved forecast rows | Rows | Valid forecast |
+|---|---:|---:|
+| Exact zero raw roll | 17,074 | 17,016 |
+| Invalid curve price | 11,168 | 11,168 |
+| No same-session curve row | 114,805 | 109,392 |
+| Invalid point volatility on curve row | 1,150 | 0 |
+
+On all 17,074 exact-zero rows, raw carry and each unscaled smoother are
+null. The 58 exact-zero rows before a usable forecast stay null through
+combination. On the next fresh observation after a zero, the saved
+120-span smoother differs from the day's raw carry by more than 0.0001
+in 7,408 of 7,418 cases. Recomputing the configured EWMAs with null
+observations skipped exactly reproduces the full-precision smoothers in
+the CRUDE_W, SUGAR_WHITE, SARONA and SOYOIL stitched artifacts. The ZL
+rows below show the retained state and the point returns across the
+missing curve observations.
+
+| ZL session | Point change | Raw carry | Carry120 before scaling | Combined forecast | Forecast observation |
+|---|---:|---:|---:|---:|---|
+| 1971-01-07 | +0.12 | 0.172587 | 1.200536 | 1.8038 | 1971-01-07 |
+| 1971-01-08 | +0.38 | null | null | 1.8038 | 1971-01-07 |
+| 1971-01-11 | +0.10 | 0.101184 | 1.181854 | 1.7403 | 1971-01-11 |
+| 1971-01-28 | −0.07 | null | null | 1.2648 | 1971-01-20 |
+| 1971-01-29 | −0.10 | null | null | 1.2648 | 1971-01-20 |
+| 1971-02-01 | −0.05 | null | null | 1.2648 | 1971-01-20 |
+| 1971-02-02 | +0.17 | 0.064407 | 1.029651 | 1.3141 | 1971-02-02 |
+
+Collapsing executable aliases leaves 16,505 exact zeros in 983,069
+same-session curve observations. Rates by weekday range from 1.65%
+to 1.73%. Two zero observations have weekend source timestamps, both
+carried on weekday rows. The panel contains no weekend-dated sessions.
+
+| Forecast age in calendar days | Valid forecast rows |
+|---|---:|
+| Same session | 1,010,892 |
+| 1–7 | 36,865 |
+| 8–30 | 37,883 |
+| 31–90 | 51,799 |
+| 91–365 | 9,528 |
+| Over 365 | 12,143 |
+
+Among the 148,218 fills, median age is 30 days and the 95th percentile is
+722 days. A total of 101,844 use a forecast originating under a different
+mark contract, and 18,327 cross a tagged source change. The longest age is
+3,889 days for the US30 routes MWN and UB. Both display the September 2,
+2010 forecast on April 26, 2021. MWN has 2,716 sessions without a curve
+row during that streak and 42 later raw observations that fail the mark
+contract match.
+
+### What reached the cash replay
+
+The cash ledger has a forecast and target on every active row. The
+public forecast panel covers 184,346 of those rows, and the cash and
+panel forecasts agree at saved precision on all of them. The other
+1,771 active rows are IB cash tails for MCL, MGC, MHG and MNQ. Their
+forecasts were verified against v4 stitched artifacts under
+`misc/cache/futures/selection_backtest/v3/carry_stitched_forecast`.
+With these artifacts included, 20,884 active cash rows use a prior
+observation and 15,569 use one older than seven days. On the 2,466 active
+rows that match an exact-zero raw roll in the public panel, all have a
+forecast and target, 1,411 have nonzero held contracts, and 26 record a
+position-changing trade. These rows earned −$8,022.51 net.
+
+In 2026, 730 of 4,221 active cash rows used a prior observation. **669
+rows used a forecast more than a year old**, all from March 28, 2024.
+Held positions were nonzero on 668 of those rows.
+
+| Symbol | Forecast used throughout 2026 | Active cash rows | Age at last session | 2026 net P&L |
+|---|---:|---:|---:|---:|
+| MCL | +1.7587 | 221 | 964 days | +$6,974.64 |
+| W | +2.0000 | 224 | 965 days | +$4,430.00 |
+| SRFXON3 | −2.0000 | 224 | 965 days | +$1,232.77 |
+| **Total** | | **669** | | **+$12,637.41** |
+
+These three symbols account for **71.4% of the saved 2026 net gain**. This
+is cash attribution to the observed positions. An alternative freshness
+policy would change selection and targets as well. In the stitched
+artifacts the carry curve and mark disagree on the current contract on
+every 2026 row for these three histories. Most rows have a valid raw
+spread. The contract mismatch prevents the new curve from refreshing the
+forecast. For example, on November 17 the MCL mark is on November 2027
+and its curve's current leg is on December 2027. In the January review,
+W was added with a rolling average absolute forecast of 2.0. SRFXON3 and
+MCL were retained with averages of 2.0 and 1.7587. The magnitude filter
+treats a repeatedly forward-filled forecast as recent activity.
+
+### Cash P&L and coverage
+
+| $75,000 fixed-cap portfolio | Saved result |
+|---|---:|
+| Last date with all 19 active cash rows, November 11, 2026 | $684,598.10 equity |
+| End of the saved curve, November 18, 2026 | $685,040.82 equity |
+| Cumulative net P&L | $610,040.82 |
+| Gross P&L | $676,070.30 |
+| Trade fees | $34,336.36 |
+| Roll fees | $31,692.41 |
+| Total fees as share of gross and net P&L | 9.77% and 10.82% |
+| Annualized arithmetic return on fixed sizing capital | 14.54% |
+| Annualized volatility | 18.47% |
+| Sharpe | 0.787 |
+| Maximum drawdown | −50.53%, −$121,756.82 |
+| Fixed-cap adjusted Calmar | 0.288 |
+| 2026 net P&L through November 18 | +$17,688.65 |
+
+The curve marks 14,318 active-book weekdays valid from January 3, 1972
+through November 18, 2026 using its PST-style zero-P&L convention for
+absent cash rows. Across that window, 1,428 dates have fewer observed
+active cash rows than scheduled names. The last five dates add $442.72.
+Four have 16 active cash rows and November 18 has six. All risk statistics
+use the saved accounting calendar and a 256-session year. Drawdown runs
+from the July 6, 1976 equity peak to the February 5, 1980 trough.
+In 1979 alone, the portfolio lost about $87,876, including −$29,807.64 in SI
+and −$24,590.59 in MGC. The year had $86,776 of gross losses and $1,099
+of fees. Fixed-cap adjusted Calmar divides the annualized arithmetic
+return by the absolute percentage drawdown.
+
+No duplicate dates, duplicate symbol-date keys, or explicitly invalid
+economically active cash rows were found. Gross less positive trade and
+roll fees exceeds the sum of reported net cash by $0.71. The sum of
+reported net cash exceeds the sum of rounded daily portfolio net by
+$0.15, and the largest daily reconciliation residual is $0.0051.
+
+Through March 28, 2024, before the first IB-tagged active cash row, equity
+was $684,933.59 and cumulative net P&L was $609,933.59. IB-tagged cash
+rows contribute $245.93 net over the full ledger. The ledger also
+contains later PST rows, so the source-tagged P&L and the P&L after the
+calendar cut measure different windows.
+
+FX (+$220,390), agriculture (+$195,806), bonds (+$140,258), and energy
+(+$100,767) were the largest class contributors. Equities (−$38,422)
+and metals (−$12,282) detracted. The leading symbols were SB (+$58,345),
+M6B (+$52,246), and SOFR3 (+$49,355). The largest losses were in ES
+(−$23,804), MGC (−$20,529), and SI (−$16,195).
+
+### Selection
+
+The 55 annual reviews averaged 58.38 candidates and 13.49 selections,
+with books ranging from four to 20. Five reviews satisfied all coverage
+targets. Across the 742 accepted allocations, every estimated maximum
+position met the one-contract floor and every reported instrument and
+book margin stayed within its cap. The 2026 review had 115 candidates
+and selected 19 names across seven classes and ten subclasses. The five
+largest weights sum to 42.85%, and the effective instrument count is
+14.89. Book margin at maximum size is $36,954.70 against a $37,500 cap.
+The review met the 15-name floor and fell one class and three subclasses
+short of coverage goals.
+
+The scheduled instrument review shows 33 probationary retentions across
+all years, zero probationary additions, and zero hard-filtered selections.
+IBEX had a 0.6119 review average absolute forecast, a modeled maximum
+position of 1.363 contracts, and a maximum daily target of 0.5074
+contracts in 2026. It held zero contracts across all 226 observed active
+sessions. The end-of-run book and the January review carry different
+activity windows. The end-of-run book labels IBEX and SX7E on probation
+using November data, while the scheduled January review labels them
+eligible using data through December 2025.
+
+### Annual out-of-sample slices
+
+The annual book count comes from that year's review. Returns divide net
+cash P&L by the fixed $75,000. Within-year drawdown uses prior year-end
+equity as its opening peak. Adjusted Calmar uses the year's 256-session
+annualized arithmetic return and the absolute within-year drawdown.
+Gross and fees are in USD. The 2026 row includes the five partial-book
+dates at the end of the saved curve.
+
+| Year | Book | Net return | Drawdown | Sharpe | Adj. Calmar | Gross P&L | Fees |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1972 | 4 | +18.90% | -12.31% | 1.35 | 1.51 | 15,439 | 1,266 |
+| 1973 | 5 | +82.76% | -5.68% | 4.80 | 14.30 | 62,781 | 712 |
+| 1974 | 9 | +69.07% | -4.74% | 3.11 | 14.30 | 52,866 | 1,061 |
+| 1975 | 8 | +21.25% | -3.21% | 1.21 | 6.50 | 17,332 | 1,398 |
+| 1976 | 8 | +11.74% | -5.68% | 0.74 | 2.02 | 10,092 | 1,284 |
+| 1977 | 10 | -2.33% | -6.94% | -0.12 | -0.33 | -171 | 1,578 |
+| 1978 | 11 | -9.10% | -5.95% | -0.51 | -1.51 | -5,585 | 1,238 |
+| 1979 | 11 | -117.17% | -40.11% | -4.74 | -2.87 | -86,776 | 1,099 |
+| 1980 | 8 | +24.59% | -14.98% | 1.01 | 1.60 | 19,220 | 775 |
+| 1981 | 8 | +50.98% | -5.94% | 2.26 | 8.41 | 39,343 | 1,111 |
+| 1982 | 9 | +30.98% | -6.65% | 1.49 | 4.57 | 24,249 | 1,012 |
+| 1983 | 10 | +17.19% | -5.29% | 1.02 | 3.20 | 13,478 | 588 |
+| 1984 | 12 | +68.55% | -4.67% | 2.82 | 14.41 | 52,334 | 924 |
+| 1985 | 12 | +1.09% | -7.82% | 0.06 | 0.14 | 2,126 | 1,305 |
+| 1986 | 14 | +0.21% | -4.95% | 0.01 | 0.04 | 1,259 | 1,099 |
+| 1987 | 13 | -22.98% | -9.97% | -0.94 | -2.26 | -16,155 | 1,082 |
+| 1988 | 11 | +22.25% | -3.30% | 1.54 | 6.61 | 17,582 | 894 |
+| 1989 | 15 | -12.55% | -6.80% | -0.72 | -1.82 | -7,768 | 1,646 |
+| 1990 | 13 | +31.15% | -2.86% | 1.58 | 10.70 | 24,531 | 1,165 |
+| 1991 | 10 | +27.22% | -2.76% | 1.74 | 9.67 | 21,546 | 1,127 |
+| 1992 | 14 | +0.46% | -6.43% | 0.02 | 0.07 | 2,396 | 2,049 |
+| 1993 | 15 | +19.15% | -4.31% | 0.91 | 4.36 | 15,746 | 1,382 |
+| 1994 | 13 | +3.45% | -5.64% | 0.19 | 0.60 | 4,227 | 1,640 |
+| 1995 | 14 | +10.29% | -2.24% | 0.72 | 4.53 | 8,983 | 1,263 |
+| 1996 | 15 | +26.27% | -3.42% | 1.23 | 7.50 | 21,170 | 1,466 |
+| 1997 | 15 | -8.59% | -4.29% | -0.52 | -1.96 | -5,128 | 1,316 |
+| 1998 | 13 | +39.18% | -4.24% | 1.78 | 9.07 | 30,652 | 1,265 |
+| 1999 | 12 | -5.44% | -3.17% | -0.33 | -1.69 | -3,043 | 1,036 |
+| 2000 | 12 | +23.76% | -3.26% | 1.28 | 7.17 | 19,009 | 1,188 |
+| 2001 | 11 | +33.24% | -2.79% | 1.80 | 11.68 | 25,713 | 786 |
+| 2002 | 14 | +35.62% | -1.68% | 1.99 | 20.81 | 27,862 | 1,147 |
+| 2003 | 15 | +38.20% | -4.86% | 1.55 | 7.72 | 30,053 | 1,401 |
+| 2004 | 12 | +49.20% | -2.87% | 2.18 | 16.74 | 37,781 | 877 |
+| 2005 | 11 | +31.90% | -1.05% | 1.98 | 29.83 | 24,940 | 1,012 |
+| 2006 | 15 | +30.32% | -1.87% | 1.73 | 15.95 | 23,702 | 959 |
+| 2007 | 18 | -1.14% | -2.31% | -0.07 | -0.49 | -5 | 850 |
+| 2008 | 16 | +21.34% | -1.61% | 1.12 | 12.94 | 16,577 | 570 |
+| 2009 | 15 | +10.49% | -1.28% | 0.60 | 8.03 | 8,583 | 712 |
+| 2010 | 13 | +41.85% | -1.38% | 2.52 | 29.83 | 32,256 | 866 |
+| 2011 | 14 | +46.10% | -2.00% | 2.26 | 22.70 | 35,516 | 944 |
+| 2012 | 17 | +10.94% | -1.30% | 0.77 | 8.23 | 9,231 | 1,025 |
+| 2013 | 16 | +0.53% | -2.71% | 0.03 | 0.19 | 1,604 | 1,206 |
+| 2014 | 18 | +18.79% | -1.21% | 1.11 | 15.24 | 15,543 | 1,454 |
+| 2015 | 18 | +2.90% | -2.42% | 0.12 | 1.18 | 3,545 | 1,369 |
+| 2016 | 18 | +15.16% | -1.79% | 0.80 | 8.32 | 13,175 | 1,803 |
+| 2017 | 17 | +29.76% | -1.28% | 2.35 | 22.82 | 24,267 | 1,946 |
+| 2018 | 18 | -9.39% | -1.91% | -0.64 | -4.81 | -5,260 | 1,781 |
+| 2019 | 16 | +20.49% | -1.02% | 1.37 | 19.76 | 17,243 | 1,874 |
+| 2020 | 17 | -10.93% | -2.95% | -0.60 | -3.62 | -6,560 | 1,639 |
+| 2021 | 18 | -21.57% | -4.25% | -1.16 | -4.98 | -14,540 | 1,639 |
+| 2022 | 17 | -5.07% | -1.52% | -0.31 | -3.28 | -3,063 | 740 |
+| 2023 | 17 | +14.43% | -3.14% | 0.64 | 4.53 | 12,038 | 1,215 |
+| 2024 | 18 | -28.17% | -3.67% | -1.61 | -7.50 | -19,988 | 1,137 |
+| 2025 | 20 | -7.57% | -1.56% | -0.52 | -4.76 | -4,405 | 1,269 |
+| 2026 | 19 | +23.58% | -0.86% | 1.52 | 30.37 | 18,530 | 841 |
