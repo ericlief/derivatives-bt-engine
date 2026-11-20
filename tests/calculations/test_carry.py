@@ -178,7 +178,7 @@ def test_carry_forward_fills_forecasts_across_invalid_rows_and_roll(monkeypatch)
     assert forecast["fcst_carry_5"][4] < forecast["fcst_carry_5"][3]
     assert forecast["forecast_valid"].to_list() == [False, True, True, True, True]
 
-    limited = expire_stale_carry_forecasts(result, 1, flat_when_expired=True).frame
+    limited = expire_stale_carry_forecasts(result, 1).frame
     assert limited["carry_stale"].to_list() == [False, False, False, True, False]
     for rule in ("fcst_carry_5", "fcst_carry_20", "fcst_carry_60", "fcst_carry_120"):
         expected = forecast[rule].to_list()

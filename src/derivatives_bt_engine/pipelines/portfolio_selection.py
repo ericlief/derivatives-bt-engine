@@ -4543,7 +4543,7 @@ def _run_complete_selection(
                         smooth_spans=carry_smooths,
                     )
                     result = expire_stale_carry_forecasts(
-                        result, args.forecast_max_stale_days, flat_when_expired=True,
+                        result, args.forecast_max_stale_days,
                     )
                 elif args.signal_model == EWMAC_CARRY_MODEL:
                     trend_result = engine.combine(
@@ -5728,7 +5728,6 @@ def _run_complete_selection(
                                 stitched_result = expire_stale_carry_forecasts(
                                     stitched_result,
                                     args.forecast_max_stale_days,
-                                    flat_when_expired=True,
                                 )
                             elif args.signal_model == EWMAC_CARRY_MODEL:
                                 trend_result = engine.combine(

@@ -1,4 +1,4 @@
-"""Turn one instrument history into an auditable combined EWMAC forecast.
+"""Combine scaled futures component forecasts and record their effective weights.
 
 The input is a single daily signal-history dataframe containing the five
 already-scaled EWMAC component forecasts. The engine selects the rules that
@@ -207,6 +207,89 @@ class CombinedForecastResult:
     weights: dict[str, float]
     fdm: float
     audit: dict[str, object]
+
+
+def combine_available_forecasts(
+    frame: pl.DataFrame,
+    weights: Mapping[str, float],
+    *,
+    fdm: float,
+    forecast_cap: float,
+    forward_fill_columns: Iterable[str] = (),
+    max_stale_days: int | None = None,
+    expiry_flags: Mapping[str, str] | None = None,
+) -> pl.DataFrame:
+    """Combine available scaled components from one instrument's daily frame.
+
+    Weight keys are component column names. Optionally forward-fill named
+    components in date order and expire each after its last finite observation
+    exceeds the calendar-day cutoff. Other inputs can supply an expiry flag
+    column per component. Such components are assumed to be aligned already.
+
+    Return the effective components, their daily weights, and the capped
+    combined forecast after FDM. Redistribute weight over finite inputs,
+    including genuine zero forecasts. When expiry leaves no weighted rules,
+    emit a zero target so positions can flatten. Warm-up stays null.
+    """
+    fill_columns = tuple(forward_fill_columns)
+    flags = dict(expiry_flags or {})
+    if fill_columns:
+        expressions: list[pl.Expr] = []
+        for column in fill_columns:
+            finite = pl.col(column).is_finite()
+            filled = pl.when(finite).then(pl.col(column)).forward_fill()
+            if max_stale_days is not None:
+                last_date = pl.when(finite).then(pl.col("date")).forward_fill()
+                stale = (
+                    (pl.col("date") - last_date).dt.total_days() > max_stale_days
+                ).fill_null(False)
+                flag = f"stale_{column}"
+                expressions.append(stale.alias(flag))
+                flags[column] = flag
+            expressions.append(filled.alias(column))
+        frame = frame.sort("date").with_columns(expressions)
+
+    if flags:
+        frame = frame.with_columns(
+            pl.when(~pl.col(flag).fill_null(False))
+            .then(pl.col(column))
+            .alias(column)
+            for column, flag in flags.items()
+        )
+
+    available = {
+        column: pl.when(pl.col(column).is_finite()).then(weight).otherwise(0.0)
+        for column, weight in weights.items()
+    }
+    total = pl.sum_horizontal(available.values())
+    forecast_valid = total > 0
+    active_expiry_flags = {
+        flags[column] for column, weight in weights.items()
+        if weight > 0 and column in flags
+    }
+    if active_expiry_flags:
+        forecast_valid |= pl.any_horizontal(
+            pl.col(flag).fill_null(False) for flag in sorted(active_expiry_flags)
+        )
+    frame = frame.with_columns(
+        forecast_valid.alias("forecast_valid"),
+        *(
+            pl.when(total > 0).then(weight / total).otherwise(0.0)
+            .alias(f"wt_{column}")
+            for column, weight in available.items()
+        ),
+    )
+    weighted_forecast = pl.sum_horizontal(
+        pl.when(pl.col(f"wt_{column}") > 0)
+        .then(pl.col(column) * pl.col(f"wt_{column}"))
+        .otherwise(0.0)
+        for column in weights
+    )
+    return frame.with_columns(
+        pl.when(pl.col("forecast_valid"))
+        .then((weighted_forecast * fdm).clip(-forecast_cap, forecast_cap))
+        .alias("combined_forecast")
+    )
 
 
 class CombinedForecastEngine:
