@@ -335,7 +335,6 @@ def plot_selection_cash_pnl(
                 color="#d62728",
                 line_dash="dashed",
                 line_width=1,
-                tools=["hover"],
             )
         panels = [
             forecast_panel,
@@ -2856,7 +2855,6 @@ class EwmacNotebookView:
                 color="#d62728",
                 line_dash="dashed",
                 line_width=1,
-                tools=["hover"],
             )
         proxy_plot = line_panel(
             reference,
