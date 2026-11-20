@@ -123,7 +123,7 @@ from derivatives_bt_engine.calculations.carry import (
     aft_final_rule_fdm,
     build_carry_forecast,
     combine_trend_and_carry_forecasts,
-    zero_stale_carry_forecasts,
+    expire_stale_carry_forecasts,
 )
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
@@ -1631,7 +1631,7 @@ def parse_args(argv=None, *, complete_default: bool = False):
         "--forecast-max-stale-days",
         type=int,
         help=(
-            "For carry and ewmac_carry, zero any forward-filled component "
+            "For carry and ewmac_carry, expire any forward-filled component "
             "older than this many calendar days across all instruments "
             "(default: unlimited)."
         ),
@@ -4343,7 +4343,7 @@ def _run_complete_selection(
                 },
             }
         if args.forecast_max_stale_days is not None:
-            reference_base_identity["forecast_max_stale_days"] = (
+            reference_base_identity["expire_forecast_after_days"] = (
                 args.forecast_max_stale_days
             )
         (
@@ -4542,8 +4542,8 @@ def _run_complete_selection(
                         min_valid_observations=args.min_forecast_obs,
                         smooth_spans=carry_smooths,
                     )
-                    result = zero_stale_carry_forecasts(
-                        result, args.forecast_max_stale_days
+                    result = expire_stale_carry_forecasts(
+                        result, args.forecast_max_stale_days, flat_when_expired=True,
                     )
                 elif args.signal_model == EWMAC_CARRY_MODEL:
                     trend_result = engine.combine(
@@ -5644,7 +5644,7 @@ def _run_complete_selection(
                                     "carry_rules": carry_smooths,
                                 }
                         if args.forecast_max_stale_days is not None:
-                            stitched_identity["forecast_max_stale_days"] = (
+                            stitched_identity["expire_forecast_after_days"] = (
                                 args.forecast_max_stale_days
                             )
                         (
@@ -5725,8 +5725,10 @@ def _run_complete_selection(
                                     min_valid_observations=args.min_forecast_obs,
                                     smooth_spans=carry_smooths,
                                 )
-                                stitched_result = zero_stale_carry_forecasts(
-                                    stitched_result, args.forecast_max_stale_days
+                                stitched_result = expire_stale_carry_forecasts(
+                                    stitched_result,
+                                    args.forecast_max_stale_days,
+                                    flat_when_expired=True,
                                 )
                             elif args.signal_model == EWMAC_CARRY_MODEL:
                                 trend_result = engine.combine(
@@ -5911,7 +5913,7 @@ def _run_complete_selection(
             "trend_forecast_valid", "carry_forecast_valid",
             "trend_family_weight", "carry_family_weight", "carry_obs_date",
             "carry_forecast_obs_date", "carry_stale_days", "trend_forecast_missing",
-            "carry_stale_zero", "trend_stale_zero",
+            "carry_stale", "trend_stale",
             "carry_excl", "ref_tgt_pos", "ref_held_pos", "ref_return_valid",
             "ref_net_pct", "source_segment", "pt_change", "close",
             "pt_vol", "point_change", "point_vol",

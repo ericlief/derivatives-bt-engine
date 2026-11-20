@@ -560,33 +560,36 @@ def build_carry_forecast(
     return CombinedForecastResult(frame, components.weights, components.fdm, audit)
 
 
-def zero_stale_carry_forecasts(
+def expire_stale_carry_forecasts(
     result: CombinedForecastResult,
     max_stale_days: int | None,
+    *,
+    flat_when_expired: bool = False,
 ) -> CombinedForecastResult:
-    """Zero filled carry rules and their combination after the calendar-day cutoff.
+    """Mark filled carry rules unavailable after the calendar-day cutoff.
 
     The last usable curve date is shared by the carry speeds. Keep that date,
     the raw observations, and the EWMA state for auditing and eventual resumption.
-    An unset cutoff returns the original result.
+    Standalone carry can request a valid zero combined forecast on expired
+    sessions to target a flat position. An unset cutoff returns the original result.
     """
     if max_stale_days is None:
         return result
     if max_stale_days < 0:
         raise ValueError("forecast staleness cutoff must be nonnegative")
     stale = (pl.col("carry_stale_days") > max_stale_days).fill_null(False)
-    columns = [
-        *(f"fcst_carry_{rule[5:]}" for rule in result.weights),
-        "combined_forecast",
-    ]
     frame = result.frame.with_columns(
-        stale.alias("carry_stale_zero"),
+        stale.alias("carry_stale"),
+        pl.when(stale & pl.col("forecast_valid"))
+        .then(0.0 if flat_when_expired else None)
+        .otherwise(pl.col("combined_forecast"))
+        .alias("combined_forecast"),
+        (pl.col("forecast_valid") & (~stale | flat_when_expired))
+        .alias("forecast_valid"),
         *(
-            pl.when(stale & pl.col(column).is_finite())
-            .then(0.0)
-            .otherwise(pl.col(column))
-            .alias(column)
-            for column in columns
+            pl.when(~stale).then(pl.col(f"fcst_carry_{rule[5:]}"))
+            .alias(f"fcst_carry_{rule[5:]}")
+            for rule in result.weights
         ),
     )
     return CombinedForecastResult(frame, result.weights, result.fdm, result.audit)
@@ -610,9 +613,9 @@ def combine_trend_and_carry_forecasts(
     The fixed AFTS FDM uses the count of positively weighted configured rules.
     Both families supply scaled, capped components. The trend frame supplies
     the daily execution grid. A row with no available weighted rules remains
-    null. With a calendar-day cutoff, each previously available rule
-    contributes zero after its last observation ages past the limit while
-    retaining its weight. Each EWMAC rule has its own observation date.
+    null until a rule has been observed. A calendar-day cutoff makes expired
+    rules unavailable, with zero weight. Each EWMAC rule has its own
+    observation date. If expiry leaves no usable rules, target flat.
     """
     if trend_weight < 0 or carry_weight < 0 or not math.isclose(
         trend_weight + carry_weight,
@@ -628,7 +631,6 @@ def combine_trend_and_carry_forecasts(
     if not math.isfinite(forecast_cap) or forecast_cap <= 0:
         raise ValueError("forecast_cap must be finite and positive")
 
-    carry = zero_stale_carry_forecasts(carry, max_stale_days)
     trend_columns: dict[str, str] = {}
     for rule in trend.weights:
         definition = EWMAC_RULE_BY_KEY.get(rule)
@@ -650,12 +652,13 @@ def combine_trend_and_carry_forecasts(
             "trend/carry blend missing component columns: "
             f"trend={missing_trend}, carry={missing_carry}"
         )
+    carry = expire_stale_carry_forecasts(carry, max_stale_days)
 
     # The trend frame owns the daily marks. Label overlapping carry inputs
     # explicitly because they belong to the potentially older curve observation.
     carry_diagnostics = (
         "carry_obs_date", "carry_forecast_obs_date", "carry_stale_days",
-        "carry_obs_valid", "carry_stale_zero",
+        "carry_obs_valid", "carry_stale",
         "carry_price", "carry_contract",
         "current_con_yr", "carry_con_yr", "con_yr_frac", "ann_point_vol",
         "raw_roll", "ann_roll", "raw_carry", "carry_valid", "carry_excl",
@@ -719,15 +722,15 @@ def combine_trend_and_carry_forecasts(
             stale = (
                 (pl.col("date") - last_date).dt.total_days() > max_stale_days
             ).fill_null(False)
-            stale_flags.append(stale.alias(f"stale_zero_{column}"))
-            filled = pl.when(stale).then(0.0).otherwise(filled)
+            stale_flags.append(stale.alias(f"stale_{column}"))
+            filled = pl.when(~stale).then(filled)
         filled_columns.append(filled.alias(column))
     frame = frame.with_columns(*filled_columns, *stale_flags)
     if stale_flags:
         frame = frame.with_columns(
             pl.any_horizontal(
-                f"stale_zero_{column}" for column in trend_columns.values()
-            ).alias("trend_stale_zero"),
+                f"stale_{column}" for column in trend_columns.values()
+            ).alias("trend_stale"),
         )
     component_weights = {
         column: final_weights[f"{family}:{rule}"]
@@ -739,10 +742,21 @@ def combine_trend_and_carry_forecasts(
         for column, weight in component_weights.items()
     }
     available_total = pl.sum_horizontal(list(available_weights.values()))
+    forecast_valid = available_total > 0
+    if max_stale_days is not None:
+        # A zero combined target can flatten an existing position. Component
+        # forecasts and weights still show that no rule supplied the target.
+        expired_rules = [
+            pl.col(f"stale_{column}")
+            for column in trend_columns.values() if component_weights[column] > 0
+        ]
+        if carry_weight > 0:
+            expired_rules.append(pl.col("carry_stale").fill_null(False))
+        forecast_valid |= pl.any_horizontal(expired_rules)
     active_rule_count = sum(weight > 0 for weight in component_weights.values())
     fdm = aft_final_rule_fdm(active_rule_count)
     frame = frame.with_columns(
-        (available_total > 0).alias("forecast_valid"),
+        forecast_valid.alias("forecast_valid"),
         pl.lit(trend.fdm).alias("trend_fdm"),
         pl.lit(carry.fdm).alias("carry_fdm"),
         pl.lit(fdm).alias("forecast_fdm"),
