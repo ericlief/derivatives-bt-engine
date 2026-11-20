@@ -396,6 +396,43 @@ def test_forecast_activity_probates_then_hard_filters_causally():
     )
 
 
+def test_per_family_forecast_activity_counts_missing_and_tracks_weak_streaks():
+    """A strong combined forecast cannot hide missing carry or swap streaks."""
+    frame = pl.DataFrame({
+        "date": [date(2024, 1, day) for day in range(1, 7)],
+        "comb_fcst": [1.0] * 6,
+        "fcst_valid": [True] * 6,
+        "trend_family_forecast": [1.0, 1.0, -0.4, 0.4, 1.0, 1.0],
+        "carry_family_forecast": [None, None, 1.0, 1.0, 0.8, None],
+    })
+    config = dict(
+        enabled=True, lookback_sessions=2, probation_min=0.5,
+        hard_min=0.25, probation_reviews=2, scope="per_family",
+    )
+    missing = _forecast_activity_at_review(frame, date(2024, 1, 3), **config)
+    assert missing["rolling_mean_abs_forecast"] == 1.0
+    assert missing["rolling_mean_abs_carry_forecast"] == 0.0
+    assert missing["forecast_activity_hard_filter"]
+    assert missing["forecast_activity_limiting_family"] == "carry"
+
+    trend_weak = _forecast_activity_at_review(
+        frame, date(2024, 1, 5), **config,
+    )
+    assert trend_weak["forecast_activity_probation"]
+    assert trend_weak["forecast_activity_limiting_family"] == "trend"
+    carry_weak = _forecast_activity_at_review(
+        frame, date(2024, 1, 7), **config, prior_family_weak_reviews={"trend": 1},
+    )
+    assert carry_weak["rolling_mean_abs_carry_forecast"] == 0.4
+    assert carry_weak["forecast_activity_probation"]
+    assert carry_weak["forecast_activity_limiting_family"] == "carry"
+    repeated = _forecast_activity_at_review(
+        frame, date(2024, 1, 7), **config, prior_family_weak_reviews={"carry": 1},
+    )
+    assert repeated["forecast_activity_hard_filter"]
+    assert repeated["forecast_activity_reason"] == "consecutive_weak_forecast_reviews:carry"
+
+
 def test_forecast_activity_hard_min_excludes_immediately():
     """The lower hard floor does not wait for a second weak review."""
     frame = pl.DataFrame({
@@ -759,11 +796,12 @@ def test_walk_forward_forecast_probation_rejects_weak_challenger():
     )
 
 
-def test_walk_forward_forecast_probation_lets_incumbent_breathe_once():
+@pytest.mark.parametrize("per_family", [False, True])
+def test_walk_forward_forecast_probation_lets_incumbent_breathe_once(per_family):
     """A healthy entrant may survive its first weak review, but not its second."""
     args = parse_args([
         "--signal-model",
-        "multi_ewmac",
+        "ewmac_carry" if per_family else "multi_ewmac",
         "--selection-rebalance",
         "monthly",
         "--min-forecast-obs",
@@ -773,6 +811,8 @@ def test_walk_forward_forecast_probation_lets_incumbent_breathe_once():
         "--weight-policy",
         "equal",
         "--selection-forecast-activity-filter",
+        "--selection-forecast-activity-scope",
+        "per_family" if per_family else "combined",
         "--selection-forecast-lookback-sessions",
         "2",
         "--selection-forecast-probation-min",
@@ -823,6 +863,14 @@ def test_walk_forward_forecast_probation_lets_incumbent_breathe_once():
         }
         for symbol in ("A", "B")
     }
+    if per_family:
+        source_rows.pop("A")
+        reference_frames = {
+            "B": reference_frames["B"].with_columns(
+                pl.col("comb_fcst").alias("carry_family_forecast"),
+                pl.lit(1.0).alias("trend_family_forecast"),
+            ),
+        }
     provider = _WalkForwardSelectionProvider(
         review_dates=[
             date(2024, 1, 4),
@@ -851,6 +899,9 @@ def test_walk_forward_forecast_probation_lets_incumbent_breathe_once():
     assert first is not None and "B" in first
     assert second is not None and "B" in second
     assert third is not None and "B" not in third
+    if per_family:
+        assert third == {}
+        assert provider.review_rows[-1]["selection_symbols"] == ""
     b_second = next(
         row
         for row in provider.review_instrument_rows

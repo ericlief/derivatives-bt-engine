@@ -1668,6 +1668,17 @@ The forecast report flags expiry with `carry_stale` and `trend_stale`, with
 individual EWMAC flags in full mode. Omitting the option leaves
 forward-fill unlimited. The same rule cache can be reused.
 
+For a scheduled EWMAC/carry run, enable `--selection-forecast-activity-filter`
+and add `--selection-forecast-activity-scope per_family` to apply the existing
+probation and hard thresholds to each family. The review uses stitched
+forecasts strictly before the review date. Each family score is the average
+absolute family forecast before the 60/40 blend weights, using the same
+trailing sessions and counting unavailable forecasts as zero. A family below
+the hard threshold blocks selection immediately. A family below the probation
+threshold blocks entry and can remove an incumbent after consecutive weak
+reviews for that family. The instrument review exposes both averages and the
+family driving the decision.
+
 `--compact` is shorthand for `--selection-report-mode compact`. It writes the
 same report types, with a narrower daily forecast panel and scheduled trial
 summary. The compact forecast panel keeps the combined and family forecasts,

@@ -57,7 +57,7 @@ import logging
 import math
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -171,6 +171,7 @@ from derivatives_bt_engine.calculations.instrument_selection import (
     EqualPortfolioWeights,
     GreedyInstrumentSelector,
     GreedySelectionConfig,
+    GreedySelectionResult,
     HandcraftedPortfolioWeights,
     SelectionCandidate,
 )
@@ -236,20 +237,23 @@ def _forecast_activity_at_review(
     hard_min: float,
     probation_reviews: int,
     prior_weak_reviews: int = 0,
+    scope: str = "combined",
+    prior_family_weak_reviews: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """Measure causal trailing forecast strength and assign review status.
 
     The metric is the mean absolute combined forecast over the last
     ``lookback_sessions`` valid observations strictly before ``review_date``.
-    Forecasts are already normalized to a target mean absolute value of one,
-    so the thresholds are comparable across the supported signal families.
+    In per-family mode, both family means use the same trailing daily rows.
+    Missing values contribute zero to each mean, and the weaker family
+    determines the probation or hard-filter decision.
 
     A value below ``hard_min`` is excluded immediately. A value below
     ``probation_min`` receives a first-review probation state and is hard
     filtered after ``probation_reviews`` consecutive weak reviews. Candidate
     admission separately restricts that probation state to incumbents, so a
     weak challenger cannot enter merely to fill book or coverage targets. A
-    healthy review resets the consecutive count. The returned mapping is
+    healthy review resets the consecutive count for that family. The mapping is
     suitable for direct inclusion in forecast and scheduled-review audits.
     """
     base = {
@@ -267,6 +271,17 @@ def _forecast_activity_at_review(
         "forecast_hard_min": hard_min,
         "forecast_probation_reviews": probation_reviews,
     }
+    per_family = scope == "per_family"
+    family_columns = ("trend_family_forecast", "carry_family_forecast")
+    if per_family:
+        base.update({
+            "forecast_activity_scope": scope,
+            "rolling_mean_abs_trend_forecast": None,
+            "rolling_mean_abs_carry_forecast": None,
+            "forecast_activity_limiting_family": None,
+            "forecast_activity_trend_weak_review_count": 0,
+            "forecast_activity_carry_weak_review_count": 0,
+        })
     if not enabled:
         return base
 
@@ -281,19 +296,27 @@ def _forecast_activity_at_review(
     missing = {
         "date", forecast_column, validity_column
     }.difference(columns)
+    if per_family:
+        missing.update(set(family_columns).difference(columns))
     if missing:
         raise ValueError(
             "forecast activity input is missing columns: "
             f"{sorted(missing)}"
         )
-    trailing = (
-        lazy_frame.filter(
-            (pl.col("date") < review_date)
-            & pl.col(validity_column).fill_null(False)
+    session_filter = pl.col("date") < review_date
+    if not per_family:
+        session_filter &= (
+            pl.col(validity_column).fill_null(False)
             & pl.col(forecast_column).is_not_null()
             & pl.col(forecast_column).is_finite()
         )
-        .select("date", pl.col(forecast_column).alias("forecast"))
+    trailing = (
+        lazy_frame.filter(session_filter)
+        .select(
+            "date",
+            pl.col(forecast_column).alias("forecast"),
+            *(family_columns if per_family else ()),
+        )
         .sort("date")
         .tail(lookback_sessions)
         .collect(engine="streaming")
@@ -310,13 +333,49 @@ def _forecast_activity_at_review(
         })
         return base
 
-    rolling_mean = float(
-        trailing.select(pl.col("forecast").abs().mean()).item()
-    )
-    weak = rolling_mean < probation_min
-    weak_reviews = prior_weak_reviews + 1 if weak else 0
-    direct_hard = rolling_mean < hard_min
-    consecutive_hard = weak and weak_reviews >= probation_reviews
+    combined_mean = trailing.select(
+        pl.col("forecast").filter(pl.col("forecast").is_finite()).abs().mean()
+    ).item()
+    if per_family:
+        trend_mean, carry_mean = trailing.select(
+            pl.when(pl.col(column).is_finite())
+            .then(pl.col(column).abs()).otherwise(0.0).mean()
+            for column in family_columns
+        ).row(0)
+        family_means = {"trend": trend_mean, "carry": carry_mean}
+        prior_counts = prior_family_weak_reviews or {}
+        family_counts = {
+            family: prior_counts.get(family, 0) + 1 if mean < probation_min else 0
+            for family, mean in family_means.items()
+        }
+        direct_families = [f for f, mean in family_means.items() if mean < hard_min]
+        consecutive_families = [
+            f for f, count in family_counts.items() if count >= probation_reviews
+        ]
+        failing_families = (
+            direct_families or consecutive_families
+            or [f for f, count in family_counts.items() if count]
+        )
+        relevant = failing_families or list(family_means)
+        limiting_family = min(relevant, key=family_means.__getitem__)
+        if len(relevant) == 2 and trend_mean == carry_mean:
+            limiting_family = "both"
+        base.update({
+            "rolling_mean_abs_trend_forecast": trend_mean,
+            "rolling_mean_abs_carry_forecast": carry_mean,
+            "forecast_activity_limiting_family": limiting_family,
+            "forecast_activity_trend_weak_review_count": family_counts["trend"],
+            "forecast_activity_carry_weak_review_count": family_counts["carry"],
+        })
+        weak_reviews = max(family_counts.values())
+        direct_hard = bool(direct_families)
+        consecutive_hard = bool(consecutive_families)
+        weak = bool(weak_reviews)
+    else:
+        weak = combined_mean < probation_min
+        weak_reviews = prior_weak_reviews + 1 if weak else 0
+        direct_hard = combined_mean < hard_min
+        consecutive_hard = weak and weak_reviews >= probation_reviews
     hard_filter = direct_hard or consecutive_hard
     probation = weak and not hard_filter
     if direct_hard:
@@ -327,8 +386,10 @@ def _forecast_activity_at_review(
         reason = "rolling_mean_abs_forecast_below_probation_min"
     else:
         reason = ""
+    if per_family and reason:
+        reason = f"{reason}:{limiting_family}"
     base.update({
-        "rolling_mean_abs_forecast": rolling_mean,
+        "rolling_mean_abs_forecast": combined_mean,
         "forecast_activity_weak_review_count": weak_reviews,
         "forecast_activity_probation": probation,
         "forecast_activity_hard_filter": hard_filter,
@@ -1807,6 +1868,15 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-forecast-activity-scope",
+        choices=("combined", "per_family"),
+        default="combined",
+        help=(
+            "Use the combined forecast or test each EWMAC/carry family "
+            "against the activity thresholds (default: combined)."
+        ),
+    )
+    parser.add_argument(
         "--selection-forecast-probation-min",
         type=float,
         default=DEFAULT_FORECAST_PROBATION_MIN,
@@ -2211,6 +2281,8 @@ def _selection_scenario_id(
             f"fah{_number_token(args.selection_forecast_hard_min)}",
             f"far{args.selection_forecast_probation_reviews}",
         ))
+        if args.selection_forecast_activity_scope == "per_family":
+            tokens.append("fafam")
     if args.max_instr_per_class is not None:
         tokens.append(f"ic{args.max_instr_per_class}")
     if args.min_instr_per_class is not None:
@@ -2662,6 +2734,8 @@ class _WalkForwardSelectionProvider:
         self.run_config = run_config
         self.args = args
         self.latest_selection = None
+        self.latest_forecast_activity: dict[str, dict[str, object]] = {}
+        self.family_weak_review_counts: dict[str, dict[str, int]] = {}
         self.latest_candidates: dict[str, SelectionCandidate] = {}
         self.latest_date: date | None = None
         self.latest_equity: float | None = None
@@ -2771,11 +2845,20 @@ class _WalkForwardSelectionProvider:
                 prior_weak_reviews=self.forecast_weak_review_count.get(
                     symbol, 0
                 ),
+                scope=self.args.selection_forecast_activity_scope,
+                prior_family_weak_reviews=self.family_weak_review_counts.get(symbol),
             )
             forecast_activity_by_symbol[symbol] = forecast_activity
             self.forecast_weak_review_count[symbol] = int(
                 forecast_activity["forecast_activity_weak_review_count"]
             )
+            if self.args.selection_forecast_activity_scope == "per_family":
+                self.family_weak_review_counts[symbol] = {
+                    family: int(forecast_activity[
+                        f"forecast_activity_{family}_weak_review_count"
+                    ])
+                    for family in ("trend", "carry")
+                }
             if forecast_activity["forecast_activity_hard_filter"]:
                 logger.debug(
                     "walk_forward_selection candidate_rejected date=%s "
@@ -2957,7 +3040,17 @@ class _WalkForwardSelectionProvider:
             histories[symbol] = history
             candidate_costs[symbol] = (trade_cost, roll_cost)
 
-        if not candidates:
+        # An empty candidate pool normally skips the review. A hard family
+        # failure must still remove an incumbent even when there is no replacement.
+        family_exit_required = (
+            self.args.selection_forecast_activity_scope == "per_family"
+            and any(
+                forecast_activity_by_symbol[symbol]["forecast_activity_hard_filter"]
+                for symbol in self.prior_selected
+                if symbol in forecast_activity_by_symbol
+            )
+        )
+        if not candidates and not family_exit_required:
             logger.warning(
                 "walk_forward_selection skipped date=%s equity=%s reason=no_candidates",
                 review_date,
@@ -2973,7 +3066,7 @@ class _WalkForwardSelectionProvider:
             min_rows=self.args.corr_min_rows,
         )
         keep = [index for index, is_covered in enumerate(covered) if is_covered]
-        if not keep:
+        if not keep and not family_exit_required:
             logger.warning(
                 "walk_forward_selection skipped date=%s equity=%s "
                 "reason=no_correlation_coverage",
@@ -2990,10 +3083,18 @@ class _WalkForwardSelectionProvider:
             args=self.args,
             rank_count_anchor=rank_count_anchor,
         )
-        selection = selector.select(
-            candidates,
-            correlation,
-            prior_selected=self.prior_selected,
+        selection = (
+            selector.select(candidates, correlation, prior_selected=self.prior_selected)
+            if candidates
+            else GreedySelectionResult(
+                selected=(),
+                final_score=selector.score([], {}, [], correlation),
+                trials=(),
+                trial_allocations=(),
+                prior_selected=self.prior_selected,
+                switch_accepted=True,
+                switch_reason="forecast_family_hard_filter_no_candidates",
+            )
         )
         self._update_rank_count_ewma(len(selection.selected))
         full_report = self.args.selection_report_mode == "full"
@@ -3287,6 +3388,7 @@ class _WalkForwardSelectionProvider:
                 "roll_cost_per_con": roll_cost,
             }
         self.latest_selection = selection
+        self.latest_forecast_activity = forecast_activity_by_symbol
         self.latest_candidates = candidate_by_symbol
         self.latest_date = review_date
         self.latest_equity = prior_net_equity
@@ -3458,13 +3560,18 @@ class _WalkForwardSelectionProvider:
             "coverage_satisfied": selection.coverage_satisfied,
             "coverage_reason": selection.coverage_reason,
         })
-        # This is the compact membership report, not a second candidate audit.
-        # Keep current and prior book members here; otherwise every weak or
-        # pre-history forecast in the source universe looks like a removal even
-        # when the instrument never participated in the book. Rejected
-        # challengers retain their forecast and feasibility diagnostics in the
-        # trial reports.
-        for symbol in sorted(selected_symbols | removed_symbols):
+        # Family activity can block entry before a symbol reaches the trial
+        # reports. Include those explicit decisions once per symbol and review.
+        family_rejections = {
+            symbol
+            for symbol, activity in forecast_activity_by_symbol.items()
+            if activity.get("forecast_activity_limiting_family")
+            and (
+                activity["forecast_activity_hard_filter"]
+                or activity["forecast_activity_probation"] and symbol not in self.prior_selected
+            )
+        }
+        for symbol in sorted(selected_symbols | removed_symbols | family_rejections):
             active = symbol in selected_symbols
             candidate = candidate_by_symbol.get(symbol)
             allocation = allocations.get(symbol)
@@ -3516,6 +3623,12 @@ class _WalkForwardSelectionProvider:
                     status = "ineligible"
                     change_reason = (
                         "forecast_activity_hard_filter:"
+                        f"{forecast_activity['forecast_activity_reason']}"
+                    )
+                elif symbol in family_rejections:
+                    status = "ineligible"
+                    change_reason = (
+                        "forecast_activity_probation_non_incumbent:"
                         f"{forecast_activity['forecast_activity_reason']}"
                     )
                 elif (
@@ -3703,7 +3816,7 @@ class _WalkForwardSelectionProvider:
             len(candidates),
             len(selection.selected),
             selection.final_score.idm,
-            next(iter(allocations.values())).get("unallocated_weight"),
+            next(iter(allocations.values()), {}).get("unallocated_weight"),
             ",".join(selection.selected),
         )
         return allocations
@@ -3818,6 +3931,16 @@ def _final_selection_frame(
             "rolling_mean_abs_forecast": audit_by_symbol[symbol].get(
                 "rolling_mean_abs_forecast"
             ),
+            **{
+                key: audit_by_symbol[symbol][key]
+                for key in (
+                    "forecast_activity_scope",
+                    "rolling_mean_abs_trend_forecast",
+                    "rolling_mean_abs_carry_forecast",
+                    "forecast_activity_limiting_family",
+                )
+                if key in audit_by_symbol[symbol]
+            },
             "forecast_activity_weak_review_count": audit_by_symbol[
                 symbol
             ].get("forecast_activity_weak_review_count"),
@@ -4749,6 +4872,7 @@ def _run_complete_selection(
             probation_min=args.selection_forecast_probation_min,
             hard_min=args.selection_forecast_hard_min,
             probation_reviews=args.selection_forecast_probation_reviews,
+            scope=args.selection_forecast_activity_scope,
         )
         subsystem_elig = bool(
             forecast_audit["forecast_elig"]
@@ -4977,7 +5101,8 @@ def _run_complete_selection(
     selection_candidate_indexes = [
         index
         for index, candidate in enumerate(candidate_list)
-        if not bool(
+        if args.selection_forecast_activity_scope == "per_family"
+        or not bool(
             audit_by_symbol[candidate.symbol][
                 "forecast_activity_hard_filter"
             ]
@@ -4997,6 +5122,7 @@ def _run_complete_selection(
         selection_candidate_list,
         selection_correlation,
     )
+    seed_selection = selection
     for trial in selection.trials:
         logger.debug(
             "selection_trial iteration=%s candidate=%s book=%s score=%s "
@@ -5938,6 +6064,11 @@ def _run_complete_selection(
                 "ref_net_pct",
                 "daily_dvol",
                 "fx_to_usd",
+                *(
+                    ("trend_family_forecast", "carry_family_forecast")
+                    if args.selection_forecast_activity_scope == "per_family"
+                    else ()
+                ),
             )
             for symbol in cash_symbols
         }
@@ -6021,6 +6152,8 @@ def _run_complete_selection(
             "hard_min": args.selection_forecast_hard_min,
             "probation_reviews": args.selection_forecast_probation_reviews,
         }
+        if args.selection_forecast_activity_scope == "per_family":
+            selection_policy_identity["forecast_activity"]["scope"] = "per_family"
     if args.signal_model == RETURN_TSMOM_MODEL:
         selection_policy_identity["return_tsmom"] = {
             "fast_window": args.fast_window,
@@ -6373,15 +6506,27 @@ def _run_complete_selection(
             )
         selection = allocation_provider.latest_selection
         candidate_by_symbol = allocation_provider.latest_candidates
-        final_frame = _final_selection_frame(
-            selection=selection,
-            candidate_by_symbol=candidate_by_symbol,
-            source_rows=source_rows,
-            audit_by_symbol=audit_by_symbol,
-            args=args,
-            selection_date=allocation_provider.latest_date,
-            selection_equity_usd=allocation_provider.latest_equity,
-        )
+        if selection.selected:
+            latest_audit = audit_by_symbol
+            if args.selection_forecast_activity_scope == "per_family":
+                latest_audit = {
+                    symbol: {
+                        **audit_by_symbol[symbol],
+                        **allocation_provider.latest_forecast_activity[symbol],
+                    }
+                    for symbol in selection.selected
+                }
+            final_frame = _final_selection_frame(
+                selection=selection,
+                candidate_by_symbol=candidate_by_symbol,
+                source_rows=source_rows,
+                audit_by_symbol=latest_audit,
+                args=args,
+                selection_date=allocation_provider.latest_date,
+                selection_equity_usd=allocation_provider.latest_equity,
+            )
+        else:
+            final_frame = final_frame.head(0)
     historical_performance_rows: list[dict[str, object]] = []
     for symbol in selection.selected:
         significance = summarize_return_significance(
@@ -6406,19 +6551,20 @@ def _run_complete_selection(
             "historical_sharpe": significance["sharpe"],
             "historical_iid_t_stat": significance["iid_t_stat"],
         })
-    final_frame = final_frame.join(
-        pl.DataFrame(historical_performance_rows, infer_schema_length=None),
-        on="symbol",
-        how="left",
-        validate="1:1",
-    )
+    if historical_performance_rows:
+        final_frame = final_frame.join(
+            pl.DataFrame(historical_performance_rows, infer_schema_length=None),
+            on="symbol",
+            how="left",
+            validate="1:1",
+        )
     book_symbols_by_date = None
     if allocation_provider is not None:
         book_by_review_date: dict[date, tuple[str, ...]] = {}
-        for review_row in allocation_provider.review_final_allocation_rows:
+        for review_row in allocation_provider.review_rows:
             review_date = review_row.get("selection_date")
-            book = str(review_row.get("book") or "")
-            if review_date is not None and book:
+            book = str(review_row.get("selection_symbols") or "")
+            if review_date is not None:
                 book_by_review_date[review_date] = tuple(
                     sorted(symbol for symbol in book.split(",") if symbol)
                 )
@@ -6491,9 +6637,16 @@ def _run_complete_selection(
     # Round only persisted public report copies. Full-precision daily analytical
     # frames remain available in Parquet and calculations above are untouched.
     public_audit = round_public_report(rename_public_report_columns(audit_frame))
+    trial_rows = pl.DataFrame(
+        selection.trials or seed_selection.trials, infer_schema_length=None,
+    ).head(len(selection.trials))
+    trial_allocation_rows = pl.DataFrame(
+        selection.trial_allocations or seed_selection.trial_allocations,
+        infer_schema_length=None,
+    ).head(len(selection.trial_allocations))
     public_trials = round_public_report(
         rename_public_report_columns(
-            pl.DataFrame(selection.trials, infer_schema_length=None).with_columns(
+            trial_rows.with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
                 pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
                     "minimum_instruments_per_class"
@@ -6541,7 +6694,7 @@ def _run_complete_selection(
     )
     public_trial_allocations = round_public_report(
         rename_public_report_columns(
-            pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
+            trial_allocation_rows
             .with_columns(
                 pl.lit(args.weight_policy).alias("wt_policy"),
                 pl.lit(args.min_instr_per_class, dtype=pl.Int64).alias(
@@ -6590,7 +6743,7 @@ def _run_complete_selection(
     # on each selection pass?" Rename the two roles so the newly added symbol
     # cannot be confused with the existing members of its accepted book.
     selection_passes = (
-        pl.DataFrame(selection.trial_allocations, infer_schema_length=None)
+        trial_allocation_rows
         .filter(pl.col("accepted"))
         .with_columns(
             pl.lit(args.weight_policy).alias("wt_policy"),
@@ -6903,6 +7056,15 @@ def run(
         )
     if args.selection_forecast_lookback_sessions <= 0:
         raise ValueError("selection forecast lookback sessions must be positive")
+    if args.selection_forecast_activity_scope == "per_family" and (
+        not args.selection_forecast_activity_filter
+        or args.signal_model != EWMAC_CARRY_MODEL
+        or args.selection_rebalance == "static"
+    ):
+        raise ValueError(
+            "per_family forecast activity requires ewmac_carry, scheduled "
+            "selection, and --selection-forecast-activity-filter"
+        )
     if (
         not math.isfinite(args.selection_forecast_hard_min)
         or not math.isfinite(args.selection_forecast_probation_min)
