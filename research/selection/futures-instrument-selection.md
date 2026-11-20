@@ -1655,6 +1655,17 @@ and FDMs on both segments. The IB tail's reference P&L fields reflect the
 cost-free series used before executable sizing and charges. The separate
 synchronized subsystem reference returns still describe the correlation input.
 
+For a staleness test, add `--forecast-max-stale-days 30` to a `carry` or
+`ewmac_carry` selection run. The cutoff applies to every instrument and
+forward-filled rule on both history segments. A rule stays usable at exactly
+the cutoff and contributes zero starting the next calendar day until a fresh
+observation arrives. Carry speeds use the last usable curve date. Each
+EWMAC rule in the blend uses its own last finite input date. An expired rule
+keeps its weight and FDM treatment, and a rule with no prior observation
+remains null. The forecast report flags the zeroing with `carry_stale_zero`
+and `trend_stale_zero`, with individual EWMAC flags in full mode. Omitting the
+option leaves forward-fill unlimited. The same rule cache can be reused.
+
 `--compact` is shorthand for `--selection-report-mode compact`. It writes the
 same report types, with a narrower daily forecast panel and scheduled trial
 summary. The compact forecast panel keeps the combined and family forecasts,

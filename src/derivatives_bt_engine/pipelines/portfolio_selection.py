@@ -123,6 +123,7 @@ from derivatives_bt_engine.calculations.carry import (
     aft_final_rule_fdm,
     build_carry_forecast,
     combine_trend_and_carry_forecasts,
+    zero_stale_carry_forecasts,
 )
 from derivatives_bt_engine.calculations.return_tsmom_forecast import (
     RETURN_TSMOM_MODEL,
@@ -1627,6 +1628,15 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--forecast-max-stale-days",
+        type=int,
+        help=(
+            "For carry and ewmac_carry, zero any forward-filled component "
+            "older than this many calendar days across all instruments "
+            "(default: unlimited)."
+        ),
+    )
+    parser.add_argument(
         "--goulding-signal-mode",
         choices=GOULDING_SIGNAL_MODES,
         default="binary",
@@ -2176,6 +2186,8 @@ def _selection_scenario_id(
         tokens[:0] = [EWMAC_CARRY_MODEL]
     else:
         tokens.append(f"fdm{_number_token(args.forecast_fdm)}")
+    if args.forecast_max_stale_days is not None:
+        tokens.append(f"staled{args.forecast_max_stale_days}")
     if (
         args.low_contract_penalty_scale
         or args.high_contract_penalty_scale
@@ -4330,6 +4342,10 @@ def _run_complete_selection(
                     for smooth in carry_smooths
                 },
             }
+        if args.forecast_max_stale_days is not None:
+            reference_base_identity["forecast_max_stale_days"] = (
+                args.forecast_max_stale_days
+            )
         (
             reference_base_path,
             reference_base_manifest_path,
@@ -4526,6 +4542,9 @@ def _run_complete_selection(
                         min_valid_observations=args.min_forecast_obs,
                         smooth_spans=carry_smooths,
                     )
+                    result = zero_stale_carry_forecasts(
+                        result, args.forecast_max_stale_days
+                    )
                 elif args.signal_model == EWMAC_CARRY_MODEL:
                     trend_result = engine.combine(
                         frames_by_history[history_code],
@@ -4552,6 +4571,7 @@ def _run_complete_selection(
                         trend_weight=DEFAULT_TREND_FAMILY_WEIGHT,
                         carry_weight=DEFAULT_CARRY_FAMILY_WEIGHT,
                         min_valid_observations=args.min_forecast_obs,
+                        max_stale_days=args.forecast_max_stale_days,
                     )
                 else:
                     result = engine.combine(
@@ -5623,6 +5643,10 @@ def _run_complete_selection(
                                     "carry_weight": DEFAULT_CARRY_FAMILY_WEIGHT,
                                     "carry_rules": carry_smooths,
                                 }
+                        if args.forecast_max_stale_days is not None:
+                            stitched_identity["forecast_max_stale_days"] = (
+                                args.forecast_max_stale_days
+                            )
                         (
                             stitched_reference_path,
                             stitched_manifest_path,
@@ -5701,6 +5725,9 @@ def _run_complete_selection(
                                     min_valid_observations=args.min_forecast_obs,
                                     smooth_spans=carry_smooths,
                                 )
+                                stitched_result = zero_stale_carry_forecasts(
+                                    stitched_result, args.forecast_max_stale_days
+                                )
                             elif args.signal_model == EWMAC_CARRY_MODEL:
                                 trend_result = engine.combine(
                                     stitched_component,
@@ -5728,6 +5755,7 @@ def _run_complete_selection(
                                     trend_weight=DEFAULT_TREND_FAMILY_WEIGHT,
                                     carry_weight=DEFAULT_CARRY_FAMILY_WEIGHT,
                                     min_valid_observations=args.min_forecast_obs,
+                                    max_stale_days=args.forecast_max_stale_days,
                                 )
                             else:
                                 stitched_result = engine.combine(
@@ -5883,6 +5911,7 @@ def _run_complete_selection(
             "trend_forecast_valid", "carry_forecast_valid",
             "trend_family_weight", "carry_family_weight", "carry_obs_date",
             "carry_forecast_obs_date", "carry_stale_days", "trend_forecast_missing",
+            "carry_stale_zero", "trend_stale_zero",
             "carry_excl", "ref_tgt_pos", "ref_held_pos", "ref_return_valid",
             "ref_net_pct", "source_segment", "pt_change", "close",
             "pt_vol", "point_change", "point_vol",
@@ -6937,6 +6966,11 @@ def run(
         )
     if args.ib_history_live is not None and args.ib_history_db is None:
         raise ValueError("--ib-history-live requires --ib-history-db")
+    if args.forecast_max_stale_days is not None:
+        if args.forecast_max_stale_days < 0:
+            raise ValueError("--forecast-max-stale-days must be nonnegative")
+        if args.signal_model not in (CARRY_MODEL, EWMAC_CARRY_MODEL):
+            raise ValueError("--forecast-max-stale-days requires carry or ewmac_carry")
     if args.ib_history_db is not None:
         ib_history_db = args.ib_history_db.expanduser().resolve()
         if not ib_history_db.is_file() and args.ib_history_live is None:

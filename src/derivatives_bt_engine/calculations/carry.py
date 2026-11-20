@@ -560,6 +560,38 @@ def build_carry_forecast(
     return CombinedForecastResult(frame, components.weights, components.fdm, audit)
 
 
+def zero_stale_carry_forecasts(
+    result: CombinedForecastResult,
+    max_stale_days: int | None,
+) -> CombinedForecastResult:
+    """Zero filled carry rules and their combination after the calendar-day cutoff.
+
+    The last usable curve date is shared by the carry speeds. Keep that date,
+    the raw observations, and the EWMA state for auditing and eventual resumption.
+    An unset cutoff returns the original result.
+    """
+    if max_stale_days is None:
+        return result
+    if max_stale_days < 0:
+        raise ValueError("forecast staleness cutoff must be nonnegative")
+    stale = (pl.col("carry_stale_days") > max_stale_days).fill_null(False)
+    columns = [
+        *(f"fcst_carry_{rule[5:]}" for rule in result.weights),
+        "combined_forecast",
+    ]
+    frame = result.frame.with_columns(
+        stale.alias("carry_stale_zero"),
+        *(
+            pl.when(stale & pl.col(column).is_finite())
+            .then(0.0)
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in columns
+        ),
+    )
+    return CombinedForecastResult(frame, result.weights, result.fdm, result.audit)
+
+
 def combine_trend_and_carry_forecasts(
     trend: CombinedForecastResult,
     carry: CombinedForecastResult,
@@ -568,6 +600,7 @@ def combine_trend_and_carry_forecasts(
     carry_weight: float = DEFAULT_CARRY_FAMILY_WEIGHT,
     forecast_cap: float = CARRY_FORECAST_CAP,
     min_valid_observations: int = 256,
+    max_stale_days: int | None = None,
 ) -> CombinedForecastResult:
     """Combine EWMAC trend and carry components with top-down family weights.
 
@@ -577,7 +610,9 @@ def combine_trend_and_carry_forecasts(
     The fixed AFTS FDM uses the count of positively weighted configured rules.
     Both families supply scaled, capped components. The trend frame supplies
     the daily execution grid. A row with no available weighted rules remains
-    null.
+    null. With a calendar-day cutoff, each previously available rule
+    contributes zero after its last observation ages past the limit while
+    retaining its weight. Each EWMAC rule has its own observation date.
     """
     if trend_weight < 0 or carry_weight < 0 or not math.isclose(
         trend_weight + carry_weight,
@@ -593,6 +628,7 @@ def combine_trend_and_carry_forecasts(
     if not math.isfinite(forecast_cap) or forecast_cap <= 0:
         raise ValueError("forecast_cap must be finite and positive")
 
+    carry = zero_stale_carry_forecasts(carry, max_stale_days)
     trend_columns: dict[str, str] = {}
     for rule in trend.weights:
         definition = EWMAC_RULE_BY_KEY.get(rule)
@@ -619,7 +655,7 @@ def combine_trend_and_carry_forecasts(
     # explicitly because they belong to the potentially older curve observation.
     carry_diagnostics = (
         "carry_obs_date", "carry_forecast_obs_date", "carry_stale_days",
-        "carry_obs_valid",
+        "carry_obs_valid", "carry_stale_zero",
         "carry_price", "carry_contract",
         "current_con_yr", "carry_con_yr", "con_yr_frac", "ann_point_vol",
         "raw_roll", "ann_roll", "raw_carry", "carry_valid", "carry_excl",
@@ -672,14 +708,27 @@ def combine_trend_and_carry_forecasts(
             pl.col(column).is_null() | ~pl.col(column).is_finite()
             for column in trend_columns.values()
         ).alias("trend_forecast_missing"),
-        *(
-            pl.when(pl.col(column).is_finite())
-            .then(pl.col(column))
-            .forward_fill()
-            .alias(column)
-            for column in trend_columns.values()
-        ),
     )
+    filled_columns = []
+    stale_flags = []
+    for column in trend_columns.values():
+        finite = pl.col(column).is_finite()
+        filled = pl.when(finite).then(pl.col(column)).forward_fill()
+        if max_stale_days is not None:
+            last_date = pl.when(finite).then(pl.col("date")).forward_fill()
+            stale = (
+                (pl.col("date") - last_date).dt.total_days() > max_stale_days
+            ).fill_null(False)
+            stale_flags.append(stale.alias(f"stale_zero_{column}"))
+            filled = pl.when(stale).then(0.0).otherwise(filled)
+        filled_columns.append(filled.alias(column))
+    frame = frame.with_columns(*filled_columns, *stale_flags)
+    if stale_flags:
+        frame = frame.with_columns(
+            pl.any_horizontal(
+                f"stale_zero_{column}" for column in trend_columns.values()
+            ).alias("trend_stale_zero"),
+        )
     component_weights = {
         column: final_weights[f"{family}:{rule}"]
         for family, columns in (("trend", trend_columns), ("carry", carry_columns))
@@ -724,6 +773,30 @@ def combine_trend_and_carry_forecasts(
         .otherwise(None)
         .alias("combined_forecast")
     )
+    if stale_flags:
+        # Report the trend-only blend from the same effective EWMAC inputs.
+        trend_rule_weights = {
+            column: pl.when(pl.col(column).is_finite())
+            .then(trend.weights[rule]).otherwise(0.0)
+            for rule, column in trend_columns.items()
+        }
+        trend_available = pl.sum_horizontal(
+            trend_rule_weights.values()
+        )
+        trend_sum = pl.sum_horizontal(
+            pl.col(column).fill_null(0.0) * weight
+            for column, weight in trend_rule_weights.items()
+        )
+        frame = frame.with_columns(
+            (trend_available > 0).alias("trend_forecast_valid"),
+            pl.when(trend_available > 0)
+            .then(
+                (trend_sum / trend_available * trend.fdm).clip(
+                    -forecast_cap, forecast_cap
+                )
+            )
+            .alias("trend_family_forecast"),
+        )
     valid = frame.filter(pl.col("forecast_valid"))
     audit: dict[str, object] = {
         "history_obs": frame.height,

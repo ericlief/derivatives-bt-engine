@@ -15,6 +15,7 @@ from derivatives_bt_engine.calculations.carry import (
     build_raw_carry_frame,
     combine_trend_and_carry_forecasts,
     contract_year_fraction,
+    zero_stale_carry_forecasts,
 )
 from derivatives_bt_engine.calculations.forecast_combination import (
     CombinedForecastResult,
@@ -161,7 +162,8 @@ def test_carry_forward_fills_forecasts_across_invalid_rows_and_roll(monkeypatch)
             "carry_price": [100.0] * 3,
         }),
     )
-    forecast = build_carry_forecast(history, min_valid_observations=2).frame
+    result = build_carry_forecast(history, min_valid_observations=2)
+    forecast = result.frame
 
     assert forecast["carry_obs_date"].to_list() == [
         None, dates[1], dates[2], None, dates[4],
@@ -175,6 +177,16 @@ def test_carry_forward_fills_forecasts_across_invalid_rows_and_roll(monkeypatch)
     assert forecast["fcst_carry_5"][1:4].to_list() == pytest.approx([0.3] * 3)
     assert forecast["fcst_carry_5"][4] < forecast["fcst_carry_5"][3]
     assert forecast["forecast_valid"].to_list() == [False, True, True, True, True]
+
+    limited = zero_stale_carry_forecasts(result, 1).frame
+    assert limited["carry_stale_zero"].to_list() == [False, False, False, True, False]
+    for rule in ("fcst_carry_5", "fcst_carry_20", "fcst_carry_60", "fcst_carry_120",
+                 "combined_forecast"):
+        expected = forecast[rule].to_list()
+        expected[3] = 0.0
+        assert limited[rule].to_list() == expected
+    assert limited["raw_carry"].equals(forecast["raw_carry"])
+    assert limited["forecast_valid"].equals(forecast["forecast_valid"])
 
     calibration = build_carry_forecast(
         history, min_valid_observations=2, turnover_max_stale_days=7,
@@ -323,3 +335,42 @@ def test_trend_carry_blend_renormalizes_available_rules(first_family: str) -> No
         blend.fdm * (0.15 - 0.40) / 0.55,
         blend.fdm * (0.15 + 0.45 * 0.5 - 0.40),
     ])
+
+
+def test_blend_zeroes_stale_components_without_redistributing_weight() -> None:
+    """Each trend rule ages independently and carry uses its source curve date."""
+    dates = [date(2024, 1, day) for day in (1, 2, 9, 10, 11)]
+    trend = CombinedForecastResult(
+        pl.DataFrame({
+            "date": dates,
+            "fcst_4_16": [None, 0.5, None, None, 0.8],
+            "fcst_8_32": [None, None, 1.0, None, None],
+            "combined_forecast": [None] * len(dates),
+            "forecast_valid": [False] * len(dates),
+        }),
+        {"4/16": 0.25, "8/32": 0.75}, 1.02, {},
+    )
+    carry = CombinedForecastResult(
+        pl.DataFrame({
+            "date": dates,
+            "carry_stale_days": [None, 0, 7, 8, 0],
+            "fcst_carry_20": [None, -1.0, -1.0, -1.0, 0.5],
+            "combined_forecast": [None, -1.0, -1.0, -1.0, 0.5],
+            "forecast_valid": [False, True, True, True, True],
+        }),
+        {"carry20": 1.0}, 1.0, {},
+    )
+    result = combine_trend_and_carry_forecasts(
+        trend, carry, min_valid_observations=2, max_stale_days=7,
+    )
+    frame = result.frame
+    assert frame["fcst_4_16"].to_list() == [None, 0.5, 0.5, 0.0, 0.8]
+    assert frame["fcst_8_32"].to_list() == [None, None, 1.0, 1.0, 1.0]
+    assert frame["fcst_carry_20"].to_list() == [None, -1.0, -1.0, 0.0, 0.5]
+    assert frame["trend_stale_zero"].to_list() == [False, False, False, True, False]
+    assert frame["carry_stale_zero"].to_list() == [False, False, False, True, False]
+    assert frame["carry_family_forecast"][3] == 0.0
+    assert frame["trend_family_forecast"][3] == pytest.approx(0.75 * trend.fdm)
+    assert frame["wt_fcst_4_16"][3] == pytest.approx(0.15)
+    assert frame["wt_fcst_carry_20"][3] == pytest.approx(0.40)
+    assert frame["combined_forecast"][3] == pytest.approx(0.45 * result.fdm)
