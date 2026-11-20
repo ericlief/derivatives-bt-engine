@@ -468,8 +468,11 @@ on 21.47% of valid rows. M1MSA is the sole subsystem exclusion, with
 | Invalid point volatility on curve row | 1,150 | 0 |
 
 On all 17,074 exact-zero rows, raw carry and each unscaled smoother are
-null. The 58 exact-zero rows before a usable forecast stay null through
-combination. On the next fresh observation after a zero, the saved
+null. Of these, 58 symbol-date rows occur before the symbol's first
+usable carry forecast. An equal-price pair supplies no input to any
+carry speed, and there is no earlier forecast to reuse, so the combined
+forecast stays null. On the other 17,016 rows, the last usable forecast
+carries forward. On the next fresh observation after a zero, the saved
 120-span smoother differs from the day's raw carry by more than 0.0001
 in 7,408 of 7,418 cases. Recomputing the configured EWMAs with null
 observations skipped exactly reproduces the full-precision smoothers in
