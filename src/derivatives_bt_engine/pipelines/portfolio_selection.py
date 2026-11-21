@@ -239,14 +239,17 @@ def _forecast_activity_at_review(
     prior_weak_reviews: int = 0,
     scope: str = "combined",
     prior_family_weak_reviews: Mapping[str, int] | None = None,
+    carry_probation_min: float | None = None,
+    carry_hard_min: float | None = None,
 ) -> dict[str, object]:
     """Measure causal trailing forecast strength and assign review status.
 
     The metric is the mean absolute combined forecast over the last
     ``lookback_sessions`` valid observations strictly before ``review_date``.
     In per-family mode, both family means use the same trailing daily rows.
-    Missing values contribute zero to each mean, and the weaker family
-    determines the probation or hard-filter decision.
+    Missing values contribute zero to each mean, and each family can
+    trigger probation or hard exclusion independently. Optional carry
+    thresholds replace the shared minima for carry only.
 
     A value below ``hard_min`` is excluded immediately. A value below
     ``probation_min`` receives a first-review probation state and is hard
@@ -274,8 +277,14 @@ def _forecast_activity_at_review(
     per_family = scope == "per_family"
     family_columns = ("trend_family_forecast", "carry_family_forecast")
     if per_family:
+        if carry_probation_min is None:
+            carry_probation_min = probation_min
+        if carry_hard_min is None:
+            carry_hard_min = hard_min
         base.update({
             "forecast_activity_scope": scope,
+            "forecast_carry_probation_min": carry_probation_min,
+            "forecast_carry_hard_min": carry_hard_min,
             "rolling_mean_abs_trend_forecast": None,
             "rolling_mean_abs_carry_forecast": None,
             "forecast_activity_limiting_family": None,
@@ -343,12 +352,17 @@ def _forecast_activity_at_review(
             for column in family_columns
         ).row(0)
         family_means = {"trend": trend_mean, "carry": carry_mean}
+        family_probation_min = {"trend": probation_min, "carry": carry_probation_min}
+        family_hard_min = {"trend": hard_min, "carry": carry_hard_min}
         prior_counts = prior_family_weak_reviews or {}
         family_counts = {
-            family: prior_counts.get(family, 0) + 1 if mean < probation_min else 0
+            family: prior_counts.get(family, 0) + 1
+            if mean < family_probation_min[family] else 0
             for family, mean in family_means.items()
         }
-        direct_families = [f for f, mean in family_means.items() if mean < hard_min]
+        direct_families = [
+            f for f, mean in family_means.items() if mean < family_hard_min[f]
+        ]
         consecutive_families = [
             f for f, count in family_counts.items() if count >= probation_reviews
         ]
@@ -1896,6 +1910,22 @@ def parse_args(argv=None, *, complete_default: bool = False):
         ),
     )
     parser.add_argument(
+        "--selection-forecast-carry-probation-min",
+        type=float,
+        help=(
+            "Carry-only probation threshold in per_family mode "
+            "(defaults to --selection-forecast-probation-min)."
+        ),
+    )
+    parser.add_argument(
+        "--selection-forecast-carry-hard-min",
+        type=float,
+        help=(
+            "Carry-only hard exclusion threshold in per_family mode "
+            "(defaults to --selection-forecast-hard-min)."
+        ),
+    )
+    parser.add_argument(
         "--selection-forecast-probation-reviews",
         type=int,
         default=DEFAULT_FORECAST_PROBATION_REVIEWS,
@@ -2149,7 +2179,15 @@ def parse_args(argv=None, *, complete_default: bool = False):
         const="compact",
         help="Shorthand for --selection-report-mode compact.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.selection_forecast_activity_scope == "per_family":
+        if args.selection_forecast_carry_probation_min is None:
+            args.selection_forecast_carry_probation_min = (
+                args.selection_forecast_probation_min
+            )
+        if args.selection_forecast_carry_hard_min is None:
+            args.selection_forecast_carry_hard_min = args.selection_forecast_hard_min
+    return args
 
 
 def _signal_report_prefix(args: argparse.Namespace) -> str:
@@ -2283,6 +2321,12 @@ def _selection_scenario_id(
         ))
         if args.selection_forecast_activity_scope == "per_family":
             tokens.append("fafam")
+            carry_probation = args.selection_forecast_carry_probation_min
+            carry_hard = args.selection_forecast_carry_hard_min
+            if carry_probation != args.selection_forecast_probation_min:
+                tokens.append(f"facp{_number_token(carry_probation)}")
+            if carry_hard != args.selection_forecast_hard_min:
+                tokens.append(f"fach{_number_token(carry_hard)}")
     if args.max_instr_per_class is not None:
         tokens.append(f"ic{args.max_instr_per_class}")
     if args.min_instr_per_class is not None:
@@ -2847,6 +2891,8 @@ class _WalkForwardSelectionProvider:
                 ),
                 scope=self.args.selection_forecast_activity_scope,
                 prior_family_weak_reviews=self.family_weak_review_counts.get(symbol),
+                carry_probation_min=self.args.selection_forecast_carry_probation_min,
+                carry_hard_min=self.args.selection_forecast_carry_hard_min,
             )
             forecast_activity_by_symbol[symbol] = forecast_activity
             self.forecast_weak_review_count[symbol] = int(
@@ -3521,6 +3567,19 @@ class _WalkForwardSelectionProvider:
                 self.args.selection_forecast_probation_min
             ),
             "forecast_hard_min": self.args.selection_forecast_hard_min,
+            **(
+                {
+                    "forecast_activity_scope": "per_family",
+                    "forecast_carry_probation_min": (
+                        self.args.selection_forecast_carry_probation_min
+                    ),
+                    "forecast_carry_hard_min": (
+                        self.args.selection_forecast_carry_hard_min
+                    ),
+                }
+                if self.args.selection_forecast_activity_scope == "per_family"
+                else {}
+            ),
             "forecast_probation_reviews": (
                 self.args.selection_forecast_probation_reviews
             ),
@@ -3935,6 +3994,8 @@ def _final_selection_frame(
                 key: audit_by_symbol[symbol][key]
                 for key in (
                     "forecast_activity_scope",
+                    "forecast_carry_probation_min",
+                    "forecast_carry_hard_min",
                     "rolling_mean_abs_trend_forecast",
                     "rolling_mean_abs_carry_forecast",
                     "forecast_activity_limiting_family",
@@ -4873,6 +4934,8 @@ def _run_complete_selection(
             hard_min=args.selection_forecast_hard_min,
             probation_reviews=args.selection_forecast_probation_reviews,
             scope=args.selection_forecast_activity_scope,
+            carry_probation_min=args.selection_forecast_carry_probation_min,
+            carry_hard_min=args.selection_forecast_carry_hard_min,
         )
         subsystem_elig = bool(
             forecast_audit["forecast_elig"]
@@ -6146,14 +6209,21 @@ def _run_complete_selection(
         "selected_book": list(selection.selected),
     }
     if args.selection_forecast_activity_filter:
-        selection_policy_identity["forecast_activity"] = {
+        activity_identity = {
             "lookback_sessions": args.selection_forecast_lookback_sessions,
             "probation_min": args.selection_forecast_probation_min,
             "hard_min": args.selection_forecast_hard_min,
             "probation_reviews": args.selection_forecast_probation_reviews,
         }
         if args.selection_forecast_activity_scope == "per_family":
-            selection_policy_identity["forecast_activity"]["scope"] = "per_family"
+            activity_identity["scope"] = "per_family"
+            carry_probation = args.selection_forecast_carry_probation_min
+            carry_hard = args.selection_forecast_carry_hard_min
+            if carry_probation != args.selection_forecast_probation_min:
+                activity_identity["carry_probation_min"] = carry_probation
+            if carry_hard != args.selection_forecast_hard_min:
+                activity_identity["carry_hard_min"] = carry_hard
+        selection_policy_identity["forecast_activity"] = activity_identity
     if args.signal_model == RETURN_TSMOM_MODEL:
         selection_policy_identity["return_tsmom"] = {
             "fast_window": args.fast_window,
@@ -7076,6 +7146,23 @@ def run(
         raise ValueError(
             "selection forecast thresholds must be finite and satisfy "
             "0 <= hard minimum <= probation minimum"
+        )
+    carry_probation_min = args.selection_forecast_carry_probation_min
+    carry_hard_min = args.selection_forecast_carry_hard_min
+    if args.selection_forecast_activity_scope == "per_family":
+        if (
+            not math.isfinite(carry_hard_min)
+            or not math.isfinite(carry_probation_min)
+            or not 0 <= carry_hard_min <= carry_probation_min
+        ):
+            raise ValueError(
+                "carry forecast thresholds must be finite and satisfy "
+                "0 <= hard minimum <= probation minimum"
+            )
+    elif carry_probation_min is not None or carry_hard_min is not None:
+        raise ValueError(
+            "carry forecast thresholds require "
+            "--selection-forecast-activity-scope per_family"
         )
     if args.selection_forecast_probation_reviews <= 0:
         raise ValueError("selection forecast probation reviews must be positive")

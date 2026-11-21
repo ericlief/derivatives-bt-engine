@@ -153,6 +153,8 @@ PUBLIC_REPORT_RENAMES = {
     "forecast_activity_hard_filter_count": "fcst_hard_filter_n",
     "forecast_probation_min": "fcst_probation_min",
     "forecast_hard_min": "fcst_hard_min",
+    "forecast_carry_probation_min": "carry_fcst_probation_min",
+    "forecast_carry_hard_min": "carry_fcst_hard_min",
     "forecast_probation_reviews": "fcst_probation_reviews",
     "selection_live_execution_overlay_count": "sel_live_exec_overlay_n",
     "preference_rank": "pref_rank",
@@ -598,6 +600,8 @@ SELECTION_REVIEW_ALLOCATION_REPORT_PARAMS = (
     "fcst_activity_lookback_n",
     "fcst_probation_min",
     "fcst_hard_min",
+    "carry_fcst_probation_min",
+    "carry_fcst_hard_min",
     "fcst_probation_reviews",
 )
 
@@ -698,6 +702,8 @@ def order_selection_review_summary_report(report: pl.DataFrame) -> pl.DataFrame:
         "fcst_activity_lookback_n",
         "fcst_probation_min",
         "fcst_hard_min",
+        "carry_fcst_probation_min",
+        "carry_fcst_hard_min",
         "fcst_probation_reviews",
     )
     leading = [name for name in priority if name in report.columns]
@@ -818,6 +824,8 @@ def order_selection_review_instrument_report(
             "fcst_activity_lookback_n",
             "fcst_probation_min",
             "fcst_hard_min",
+            "carry_fcst_probation_min",
+            "carry_fcst_hard_min",
             "fcst_probation_reviews",
         )
         if name in report.columns

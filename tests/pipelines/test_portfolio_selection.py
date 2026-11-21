@@ -432,6 +432,52 @@ def test_per_family_forecast_activity_counts_missing_and_tracks_weak_streaks():
     assert repeated["forecast_activity_hard_filter"]
     assert repeated["forecast_activity_reason"] == "consecutive_weak_forecast_reviews:carry"
 
+    carry_override = {
+        **config, "carry_probation_min": 0.4, "carry_hard_min": 0.2,
+    }
+    recovered = _forecast_activity_at_review(
+        frame, date(2024, 1, 7), **carry_override,
+        prior_family_weak_reviews={"carry": 1},
+    )
+    assert recovered["forecast_activity_status"] == "eligible"
+    assert recovered["forecast_activity_carry_weak_review_count"] == 0
+    assert recovered["forecast_carry_probation_min"] == 0.4
+    assert recovered["forecast_carry_hard_min"] == 0.2
+    assert _forecast_activity_at_review(
+        frame, date(2024, 1, 5), **carry_override,
+    )["forecast_activity_reason"] == "rolling_mean_abs_forecast_below_probation_min:trend"
+    assert _forecast_activity_at_review(
+        frame, date(2024, 1, 3), **carry_override,
+    )["forecast_activity_reason"] == "rolling_mean_abs_forecast_below_hard_min:carry"
+    marginal_carry = frame.with_columns(
+        pl.lit(0.22).alias("carry_family_forecast"),
+    )
+    assert _forecast_activity_at_review(
+        marginal_carry, date(2024, 1, 3), **config,
+    )["forecast_activity_status"] == "hard_filter"
+    assert _forecast_activity_at_review(
+        marginal_carry, date(2024, 1, 3), **carry_override,
+    )["forecast_activity_status"] == "probation"
+
+
+@pytest.mark.parametrize("flags, message", [
+    ([
+        "--signal-model", "ewmac_carry",
+        "--selection-forecast-carry-probation-min", "0.4",
+    ], "scope per_family"),
+    ([
+        "--signal-model", "ewmac_carry",
+        "--selection-rebalance", "yearly",
+        "--selection-forecast-activity-filter",
+        "--selection-forecast-activity-scope", "per_family",
+        "--selection-forecast-carry-probation-min", "0.2",
+    ], "0 <= hard minimum <= probation minimum"),
+])
+def test_carry_threshold_overrides_require_valid_per_family_settings(flags, message):
+    """Reject orphaned overrides and a carry probation floor below the hard floor."""
+    with pytest.raises(ValueError, match=message):
+        run(flags)
+
 
 def test_forecast_activity_hard_min_excludes_immediately():
     """The lower hard floor does not wait for a second weak review."""

@@ -1679,6 +1679,16 @@ threshold blocks entry and can remove an incumbent after consecutive weak
 reviews for that family. The instrument review exposes both averages and the
 family driving the decision.
 
+In per-family mode, `--selection-forecast-carry-probation-min` and
+`--selection-forecast-carry-hard-min` override the thresholds for carry.
+Each omitted option inherits its corresponding shared threshold. To test the
+carry setting from the [threshold audit](ewmac-carry-family-threshold-audit-20261120.md),
+add `--selection-forecast-carry-probation-min .40` to the per-family command
+with the shared thresholds at .50 and .25. The effective carry thresholds
+appear as `carry_fcst_probation_min` and `carry_fcst_hard_min` in the
+forecast audit, review summaries, instrument reviews and final book. The rule
+cache remains reusable.
+
 `--compact` is shorthand for `--selection-report-mode compact`. It writes the
 same report types, with a narrower daily forecast panel and scheduled trial
 summary. The compact forecast panel keeps the combined and family forecasts,
